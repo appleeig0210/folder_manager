@@ -131,6 +131,13 @@ class PeopleDataStore:
         cache = self._get_or_scan_folder(target)
         return list(cache.media_items)
 
+    def get_folder_media_type_flags(self, folder: Path) -> tuple[bool, bool]:
+        """遞迴掃描資料夾底下是否含圖片／影片（使用快取）。"""
+        cache = self._get_or_scan_folder(Path(folder))
+        has_image = any(m.media_type == "image" for m in cache.media_items)
+        has_video = any(m.media_type == "video" for m in cache.media_items)
+        return has_image, has_video
+
     def clear_cache(self) -> None:
         with self._cache_lock:
             self._folder_index_cache.clear()

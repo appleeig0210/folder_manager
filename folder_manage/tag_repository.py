@@ -77,6 +77,35 @@ class TagRepository:
             del self._tags_by_key[key]
             self.save()
 
+    def rename_relative_path_root(self, old_rel: str, new_rel: str) -> None:
+        """當資料夾相對於主資料夾的路徑改變時，同步更新所有標籤鍵（含子路徑）。"""
+        old_rel = (old_rel or "").strip().replace("\\", "/").strip("/")
+        new_rel = (new_rel or "").strip().replace("\\", "/").strip("/")
+        if not old_rel or not new_rel or old_rel == new_rel:
+            return
+
+        mapping: list[tuple[str, str]] = []
+        for key in list(self._tags_by_key.keys()):
+            if key == old_rel:
+                mapping.append((key, new_rel))
+            elif key.startswith(old_rel + "/"):
+                mapping.append((key, new_rel + key[len(old_rel) :]))
+
+        if not mapping:
+            return
+
+        new_key_tags: dict[str, list[str]] = {}
+        for old_k, new_k in mapping:
+            tags = self._tags_by_key.pop(old_k, [])
+            new_key_tags[new_k] = self._normalize_tags(new_key_tags.get(new_k, []) + tags)
+
+        for new_k, tags in new_key_tags.items():
+            if new_k in self._tags_by_key:
+                self._tags_by_key[new_k] = self._normalize_tags(self._tags_by_key[new_k] + tags)
+            else:
+                self._tags_by_key[new_k] = tags
+        self.save()
+
     def remove_keys_by_prefix(self, prefix: str) -> int:
         clean_prefix = (prefix or "").strip().strip("/")
         if not clean_prefix:

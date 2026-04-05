@@ -18,7 +18,7 @@ from typing import Optional
 import customtkinter as ctk
 import tkinter as tk
 from PIL import Image, ImageDraw
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from app_paths import get_app_data_dir, get_config_path
 from people_data_store import MediaItem, PeopleDataStore, SubfolderEntry
@@ -38,11 +38,12 @@ MEDIA_CARD_SIZE = (280, 290)
 
 ENTRY_COLUMNS = 3
 MEDIA_COLUMNS = 4
-ENTRY_BATCH_FIRST = 9
-ENTRY_BATCH_SIZE = 24
-MEDIA_BATCH_FIRST = 12
-MEDIA_BATCH_SIZE = 28
-NEXT_BATCH_DELAY_MS = 30
+ENTRY_BATCH_FIRST = 6
+ENTRY_BATCH_SIZE = 12
+MEDIA_BATCH_FIRST = 8
+MEDIA_BATCH_SIZE = 16
+THUMB_YVIEW_LOAD_THRESHOLD = 0.78
+THUMB_YVIEW_DEBOUNCE_MS = 90
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -311,10 +312,16 @@ class PeopleFolderManagerApp:
         self.current_media_items: list[MediaItem] = []
         self.current_scope_label = "未選擇"
         self.current_view_mode = "entries"
+        self._thumb_paging_state: Optional[dict] = None
+        self._thumb_scroll_hooked = False
+        self._thumb_yview_after_id: Optional[str] = None
         self.current_subfolder_entry: Optional[SubfolderEntry] = None
         self.filter_vars: dict[str, ctk.BooleanVar] = {}
         self.selected_filter_tags: set[str] = set()
+        self.filter_media_video_var = ctk.BooleanVar(value=False)
+        self.filter_media_image_var = ctk.BooleanVar(value=False)
         self._context_target: Optional[SubfolderEntry] = None
+        self._context_media_item: Optional[MediaItem] = None
 
         self.load_session_id = 0
         self.active_session_id = 0
@@ -417,10 +424,28 @@ class PeopleFolderManagerApp:
             anchor="w", padx=10, pady=(8, 4)
         )
         self.filter_tags_container = ctk.CTkScrollableFrame(filter_frame, height=96)
-        self.filter_tags_container.pack(fill="x", padx=8, pady=(0, 8))
+        self.filter_tags_container.pack(fill="x", padx=8, pady=(0, 6))
+        media_row = ctk.CTkFrame(filter_frame, fg_color="transparent")
+        media_row.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(media_row, text="媒體類型：", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 6))
+        ctk.CTkCheckBox(
+            media_row,
+            text="影片",
+            variable=self.filter_media_video_var,
+            command=self.on_media_type_filter_changed,
+            width=70,
+        ).pack(side="left", padx=(0, 10))
+        ctk.CTkCheckBox(
+            media_row,
+            text="圖片",
+            variable=self.filter_media_image_var,
+            command=self.on_media_type_filter_changed,
+            width=70,
+        ).pack(side="left")
 
         self.thumbnail_scroll = ctk.CTkScrollableFrame(right_frame, label_text="子資料夾縮圖預覽")
         self.thumbnail_scroll.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self._ensure_thumbnail_scroll_hook()
 
         status_frame = ctk.CTkFrame(self.root)
         status_frame.pack(fill="x", padx=10, pady=(0, 10))
@@ -430,6 +455,8 @@ class PeopleFolderManagerApp:
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="添加標籤", command=self.add_tags_to_current_target)
         self.context_menu.add_command(label="打開目標資料夾", command=self.open_current_target_folder)
+        self.context_menu.add_command(label="重新命名資料夾", command=self.rename_current_target_folder)
+        self.context_menu.add_command(label="重新命名檔案", command=self.rename_current_target_file)
         self.context_menu.add_command(label="轉移資料夾內容到…", command=self.transfer_current_target_folder)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="刪除資料夾", command=self.delete_current_target_folder)
@@ -536,36 +563,43 @@ class PeopleFolderManagerApp:
             self._build_tag_filtered_tree(root_node)
         else:
             for person_folder in self.store.get_people_folders():
+                if not self._tree_folder_visible_with_media_filter(person_folder):
+                    continue
                 person_node = self.folder_tree.insert(root_node, "end", text=person_folder.name, open=False)
                 self.tree_metadata[person_node] = {
                     "type": "person",
                     "path": person_folder,
                     "person_name": person_folder.name,
-                    "lazy_loaded": False,
+                    "lazy_loaded": True,
                 }
-                entries = self.store.get_subfolder_entries_shallow(person_folder)
-                self.person_entries[person_folder.name] = entries
-                self._populate_person_node(person_node, person_folder, entries)
-                self.tree_metadata[person_node]["lazy_loaded"] = True
+                self._index_node_path(person_node, person_folder)
+                self._populate_person_tree_shallow(person_node, person_folder)
 
         self.refresh_filter_panel()
         if restore_state:
             self._restore_tree_state(restore_state)
         self.set_status("已刷新資料夾樹狀清單")
-        self._perf_log("refresh_tree", start, extra=f"people={len(self.person_entries)}")
+        self._perf_log(
+            "refresh_tree",
+            start,
+            extra=f"people={len(self.store.get_people_folders()) if self.store.root_folder else 0}",
+        )
 
-    def _populate_person_node(self, person_node: str, person_folder: Path, entries: list[SubfolderEntry]) -> None:
-        for entry in entries:
-            child = self.folder_tree.insert(person_node, "end", text=entry.subfolder_name, open=False)
+    def _populate_person_tree_shallow(self, person_node: str, person_folder: Path) -> None:
+        """僅列出第一層子資料夾名稱，不掃描媒體（延遲到選取人物／根節點時再掃描）。"""
+        for subfolder in self.store.get_subfolders(person_folder):
+            if not self._tree_folder_visible_with_media_filter(subfolder):
+                continue
+            child = self.folder_tree.insert(person_node, "end", text=subfolder.name, open=False)
             self.tree_metadata[child] = {
                 "type": "subfolder",
-                "entry": entry,
-                "path": entry.subfolder_path,
+                "entry": None,
+                "path": subfolder,
                 "person_name": person_folder.name,
                 "lazy_loaded": False,
             }
-            self._index_node_path(child, entry.subfolder_path)
-            self._ensure_expand_stub(child, entry.subfolder_path)
+            self._index_node_path(child, subfolder)
+            self._ensure_expand_stub(child, subfolder)
 
     def _relative_key_matches_tag_filter(self, relative_key: str) -> bool:
         if not self.selected_filter_tags:
@@ -574,6 +608,77 @@ class PeopleFolderManagerApp:
             return False
         eff = set(self.tag_repo.get_effective_tags(relative_key))
         return bool(eff.intersection(self.selected_filter_tags))
+
+    def _media_type_filter_enabled(self) -> bool:
+        return bool(self.filter_media_video_var.get() or self.filter_media_image_var.get())
+
+    def _folder_matches_media_type_filter(self, folder: Path) -> bool:
+        if not self._media_type_filter_enabled():
+            return True
+        has_image, has_video = self.store.get_folder_media_type_flags(folder)
+        want_v = self.filter_media_video_var.get()
+        want_i = self.filter_media_image_var.get()
+        if want_v and want_i:
+            return has_video and has_image
+        if want_v:
+            return has_video
+        if want_i:
+            return has_image
+        return True
+
+    def _tree_folder_visible_with_media_filter(self, folder: Path) -> bool:
+        if not self._media_type_filter_enabled():
+            return True
+        if self._folder_matches_media_type_filter(folder):
+            return True
+        try:
+            for sub in self.store.get_subfolders(folder):
+                if self._tree_folder_visible_with_media_filter(sub):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _folder_has_visible_subdirs_for_tree(self, folder_path: Path) -> bool:
+        if not self._media_type_filter_enabled():
+            return self._folder_has_subdirs(folder_path)
+        try:
+            for sub in self.store.get_subfolders(folder_path):
+                if self._tree_folder_visible_with_media_filter(sub):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _apply_media_entry_filter(self, entries: list[SubfolderEntry]) -> list[SubfolderEntry]:
+        if not self._media_type_filter_enabled():
+            return entries
+        return [e for e in entries if self._tree_folder_visible_with_media_filter(e.subfolder_path)]
+
+    def _filter_media_items_for_preview(self, items: list[MediaItem]) -> list[MediaItem]:
+        want_v = self.filter_media_video_var.get()
+        want_i = self.filter_media_image_var.get()
+        if not want_v and not want_i:
+            return list(items)
+        if want_v and want_i:
+            return list(items)
+        if want_v:
+            return [m for m in items if m.media_type == "video"]
+        return [m for m in items if m.media_type == "image"]
+
+    def _refresh_tree_and_reload_selection(self) -> None:
+        tree_state = self._capture_tree_state()
+        self.refresh_tree(restore_state=tree_state)
+        selected = self.folder_tree.selection()
+        if selected:
+            self._apply_tree_selection_from_item_id(selected[0])
+        else:
+            self.clear_thumbnail_cards()
+            self.scope_label.configure(text="目前檢視：未選擇")
+            self.set_status("就緒")
+
+    def on_media_type_filter_changed(self) -> None:
+        self._refresh_tree_and_reload_selection()
 
     def _collect_tag_filter_state_for_person(
         self, person_folder: Path, person_name: str
@@ -588,6 +693,8 @@ class PeopleFolderManagerApp:
                     except Exception:
                         continue
                     if self._relative_key_matches_tag_filter(rk):
+                        if not self._folder_matches_media_type_filter(path):
+                            continue
                         matching_keys.add(rk)
         except Exception:
             return set(), []
@@ -609,6 +716,8 @@ class PeopleFolderManagerApp:
 
     def _build_tag_filtered_tree(self, root_node: str) -> None:
         for person_folder in self.store.get_people_folders():
+            if not self._tree_folder_visible_with_media_filter(person_folder):
+                continue
             visible, matching_entries = self._collect_tag_filter_state_for_person(person_folder, person_folder.name)
             if not visible:
                 continue
@@ -659,7 +768,7 @@ class PeopleFolderManagerApp:
                 self.folder_tree.item(child, open=True)
 
     def _ensure_expand_stub(self, node_id: str, folder_path: Path) -> None:
-        if self._folder_has_subdirs(folder_path):
+        if self._folder_has_visible_subdirs_for_tree(folder_path):
             stub = self.folder_tree.insert(node_id, "end", text="...")
             self.tree_metadata[stub] = {"type": "stub"}
 
@@ -690,11 +799,12 @@ class PeopleFolderManagerApp:
         person_name = payload["person_name"]
         subfolders = self.store.get_subfolders(parent_path)
         for subfolder in subfolders:
-            entry = self._build_entry_for_folder(subfolder, person_name)
+            if not self._tree_folder_visible_with_media_filter(subfolder):
+                continue
             child = self.folder_tree.insert(node_id, "end", text=subfolder.name, open=False)
             self.tree_metadata[child] = {
                 "type": "subfolder",
-                "entry": entry,
+                "entry": None,
                 "path": subfolder,
                 "person_name": person_name,
                 "lazy_loaded": False,
@@ -784,64 +894,132 @@ class PeopleFolderManagerApp:
             media_count=media_count,
         )
 
-    def on_tree_select(self, _event=None) -> None:
-        selected = self.folder_tree.selection()
-        if not selected:
+    def _entry_for_tree_subfolder(self, payload: dict) -> SubfolderEntry:
+        entry = payload.get("entry")
+        if isinstance(entry, SubfolderEntry):
+            return entry
+        path = payload["path"]
+        person_name = payload["person_name"]
+        entry = self._build_entry_for_folder(Path(path), person_name)
+        payload["entry"] = entry
+        return entry
+
+    @staticmethod
+    def _invalid_name_chars() -> set[str]:
+        return {'\\', '/', ':', '*', '?', '"', '<', '>', '|'}
+
+    def _is_valid_folder_basename(self, name: str) -> bool:
+        s = (name or "").strip()
+        if not s or s in (".", ".."):
+            return False
+        return not any(c in s for c in self._invalid_name_chars())
+
+    def _is_valid_file_stem(self, stem: str) -> bool:
+        s = (stem or "").strip()
+        if not s:
+            return False
+        return not any(c in s for c in self._invalid_name_chars())
+
+    def _tree_state_after_folder_rename(self, old_path: Path, new_path: Path, state: dict) -> dict:
+        old_key = self._path_key(old_path)
+        new_key = self._path_key(new_path)
+        try:
+            old_r = Path(old_path).resolve()
+            new_r = Path(new_path).resolve()
+        except Exception:
+            return dict(state)
+
+        def rewrite_one(p: str) -> str:
+            if p == old_key:
+                return new_key
+            try:
+                cand = Path(p).resolve()
+                rel = cand.relative_to(old_r)
+                return self._path_key(new_r / rel)
+            except ValueError:
+                return p
+
+        out = dict(state)
+        sp = state.get("selected_path")
+        if isinstance(sp, str):
+            out["selected_path"] = rewrite_one(sp)
+        ex = state.get("expanded_paths") or []
+        out["expanded_paths"] = [rewrite_one(x) for x in ex]
+        return out
+
+    def _cancel_thumb_yview_debounce(self) -> None:
+        if self._thumb_yview_after_id:
+            try:
+                self.root.after_cancel(self._thumb_yview_after_id)
+            except Exception:
+                pass
+            self._thumb_yview_after_id = None
+
+    def _ensure_thumbnail_scroll_hook(self) -> None:
+        if self._thumb_scroll_hooked:
             return
-        self._pending_selected_item = selected[0]
-        if self._pending_select_after_id:
-            self.root.after_cancel(self._pending_select_after_id)
-        self._pending_select_after_id = self.root.after(self.selection_debounce_ms, self._process_tree_selection)
+        canvas = self.thumbnail_scroll._parent_canvas
+        scrollbar = self.thumbnail_scroll._scrollbar
 
-    def _process_tree_selection(self) -> None:
-        self._pending_select_after_id = None
-        if not self._pending_selected_item:
+        def yscroll_cmd(first: str, last: str) -> None:
+            scrollbar.set(first, last)
+            self._schedule_thumb_yview_check()
+
+        canvas.configure(yscrollcommand=yscroll_cmd)
+        self._thumb_scroll_hooked = True
+
+    def _schedule_thumb_yview_check(self) -> None:
+        self._cancel_thumb_yview_debounce()
+        self._thumb_yview_after_id = self.root.after(THUMB_YVIEW_DEBOUNCE_MS, self._flush_thumb_yview_check)
+
+    def _flush_thumb_yview_check(self) -> None:
+        self._thumb_yview_after_id = None
+        try:
+            _, bottom = self.thumbnail_scroll._parent_canvas.yview()
+        except Exception:
             return
-        item_id = self._pending_selected_item
-        self._pending_selected_item = None
-        payload = self.tree_metadata.get(item_id)
-        if not payload:
+        if bottom < THUMB_YVIEW_LOAD_THRESHOLD:
             return
+        self._thumb_extend_from_scroll()
+        self.root.after(40, self._try_fill_thumbnail_viewport)
 
-        node_type = payload.get("type")
-        if node_type == "root":
-            merged: list[SubfolderEntry] = []
-            for entries in self.person_entries.values():
-                merged.extend(entries)
-            self.current_scope_label = "全部人物"
-            self.render_entries(merged)
-        elif node_type == "person":
-            person_folder = payload["path"]
-            self.current_scope_label = person_folder.name
-            self.render_entries(self.person_entries.get(person_folder.name, []))
-        elif node_type == "subfolder":
-            entry = payload["entry"]
-            self.current_scope_label = f"{entry.person_name} / {entry.subfolder_name}"
-            self.render_subfolder_media(entry)
-
-    def clear_thumbnail_cards(self) -> None:
-        for child in self.thumbnail_scroll.winfo_children():
-            child.destroy()
-
-    def render_entries(self, entries: list[SubfolderEntry]) -> None:
-        sid = self._new_session()
-        self.current_view_mode = "entries"
-        self.current_subfolder_entry = None
-        self.current_entries = list(entries)
-        self.current_media_items = []
-        self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}")
-        filtered = self._apply_tag_filter(entries)
-        self.clear_thumbnail_cards()
-        if not filtered:
-            ctk.CTkLabel(self.thumbnail_scroll, text="沒有可顯示的子資料夾").grid(row=0, column=0, padx=16, pady=16, sticky="w")
-            self.set_status("目前篩選條件沒有結果")
+    def _thumb_extend_from_scroll(self) -> None:
+        st = self._thumb_paging_state
+        if not st:
             return
-        for col in range(ENTRY_COLUMNS):
-            self.thumbnail_scroll.grid_columnconfigure(col, weight=0, minsize=ENTRY_CARD_SIZE[0] + 16)
-        self._render_entry_batch(filtered, sid, 0)
+        if not self._is_active_session(st["sid"]):
+            return
+        if st["kind"] == "entries" and st["next_index"] < len(st["entries"]):
+            self._thumb_append_entries(st)
+        elif st["kind"] == "media" and st["next_index"] < len(st["items"]):
+            self._thumb_append_media(st)
 
-    def _render_entry_batch(self, entries: list[SubfolderEntry], sid: int, start: int) -> None:
-        if not self._is_active_session(sid):
+    def _try_fill_thumbnail_viewport(self) -> None:
+        st = self._thumb_paging_state
+        if not st or not self._is_active_session(st["sid"]):
+            return
+        try:
+            _, bottom = self.thumbnail_scroll._parent_canvas.yview()
+        except Exception:
+            return
+        if bottom < 0.94:
+            return
+        if st["kind"] == "entries":
+            if st["next_index"] >= len(st["entries"]):
+                return
+            self._thumb_append_entries(st)
+            self.root.after(16, self._try_fill_thumbnail_viewport)
+        elif st["kind"] == "media":
+            if st["next_index"] >= len(st["items"]):
+                return
+            self._thumb_append_media(st)
+            self.root.after(16, self._try_fill_thumbnail_viewport)
+
+    def _thumb_append_entries(self, st: dict) -> None:
+        sid = st["sid"]
+        entries: list[SubfolderEntry] = st["entries"]
+        start = st["next_index"]
+        if not self._is_active_session(sid) or start >= len(entries):
             return
         batch_size = ENTRY_BATCH_FIRST if start == 0 else ENTRY_BATCH_SIZE
         end = min(start + batch_size, len(entries))
@@ -858,10 +1036,185 @@ class PeopleFolderManagerApp:
                     self._apply_thumbnail, session_id, lbl, f, ENTRY_THUMBNAIL_SIZE
                 )
             )
+        st["next_index"] = end
+        if end >= len(entries):
+            self.set_status(f"已顯示全部 {len(entries)} 個子資料夾")
+        else:
+            self.set_status(f"顯示 {end}/{len(entries)} 個子資料夾（捲到底部載入更多）")
 
-        self.set_status(f"顯示 {end}/{len(entries)} 個子資料夾")
-        if end < len(entries):
-            self.root.after(NEXT_BATCH_DELAY_MS, lambda: self._render_entry_batch(entries, sid, end))
+    def _thumb_append_media(self, st: dict) -> None:
+        sid = st["sid"]
+        media_items: list[MediaItem] = st["items"]
+        tree_entry: SubfolderEntry = st["entry"]
+        start = st["next_index"]
+        if not self._is_active_session(sid) or start >= len(media_items):
+            return
+        batch_size = MEDIA_BATCH_FIRST if start == 0 else MEDIA_BATCH_SIZE
+        end = min(start + batch_size, len(media_items))
+        for idx in range(start, end):
+            item = media_items[idx]
+            row = idx // MEDIA_COLUMNS
+            col = idx % MEDIA_COLUMNS
+            card, image_label = self._create_media_card(row, col, item)
+            self._bind_media_card_context_menu(card, item)
+            fut = self.thumb_executor.submit(
+                self.thumbnail_service.get_file_thumbnail, item.media_path, item.media_type, MEDIA_THUMBNAIL_SIZE
+            )
+            fut.add_done_callback(
+                lambda f, session_id=sid, lbl=image_label: self._enqueue_ui_task(
+                    self._apply_thumbnail, session_id, lbl, f, MEDIA_THUMBNAIL_SIZE
+                )
+            )
+        st["next_index"] = end
+        if end >= len(media_items):
+            self.set_status(f"已顯示全部 {len(media_items)} 個媒體檔案")
+        else:
+            self.set_status(f"顯示 {end}/{len(media_items)} 個媒體檔案（捲到底部載入更多）")
+
+    def _merged_entries_background(self) -> tuple[list[SubfolderEntry], dict[str, list[SubfolderEntry]]]:
+        per_person: dict[str, list[SubfolderEntry]] = {}
+        merged: list[SubfolderEntry] = []
+        for person_folder in self.store.get_people_folders():
+            entries = self.store.get_subfolder_entries_shallow(person_folder)
+            per_person[person_folder.name] = entries
+            merged.extend(entries)
+        return merged, per_person
+
+    def _begin_load_merged_entries(self) -> None:
+        sid = self._new_session()
+        self.current_view_mode = "entries_pending"
+        self.current_subfolder_entry = None
+        self.current_media_items = []
+        self.current_entries = []
+        self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}")
+        self.clear_thumbnail_cards()
+        ctk.CTkLabel(self.thumbnail_scroll, text="載入全部人物的子資料夾清單…", anchor="w").grid(
+            row=0, column=0, padx=12, pady=12, sticky="w"
+        )
+        self.set_status("掃描各人物資料夾…")
+        fut = self.scan_executor.submit(self._merged_entries_background)
+        fut.add_done_callback(
+            lambda f, session_id=sid: self._enqueue_ui_task(self._on_merged_entries_loaded, session_id, f)
+        )
+
+    def _on_merged_entries_loaded(self, sid: int, future) -> None:
+        if not self._is_active_session(sid):
+            return
+        try:
+            merged, per_person = future.result()
+        except Exception as exc:
+            messagebox.showerror("錯誤", f"載入清單失敗：\n{exc}")
+            return
+        self.person_entries.clear()
+        self.person_entries.update(per_person)
+        self.render_entries(merged, reuse_session=sid)
+
+    def _begin_load_person_entries(self, person_folder: Path) -> None:
+        sid = self._new_session()
+        self.current_view_mode = "entries_pending"
+        self.current_subfolder_entry = None
+        self.current_media_items = []
+        self.current_entries = []
+        self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}")
+        self.clear_thumbnail_cards()
+        ctk.CTkLabel(self.thumbnail_scroll, text="載入子資料夾清單中…", anchor="w").grid(row=0, column=0, padx=12, pady=12, sticky="w")
+        self.set_status("掃描子資料夾中…")
+        fut = self.scan_executor.submit(self.store.get_subfolder_entries_shallow, person_folder)
+        fut.add_done_callback(
+            lambda f, session_id=sid, pf=person_folder: self._enqueue_ui_task(
+                self._on_shallow_entries_loaded_for_person, session_id, pf, f
+            )
+        )
+
+    def _on_shallow_entries_loaded_for_person(self, sid: int, person_folder: Path, future) -> None:
+        if not self._is_active_session(sid):
+            return
+        try:
+            entries = future.result()
+        except Exception as exc:
+            messagebox.showerror("錯誤", f"載入子資料夾清單失敗：\n{exc}")
+            return
+        self.person_entries[person_folder.name] = entries
+        self.render_entries(entries, reuse_session=sid)
+
+    def on_tree_select(self, _event=None) -> None:
+        selected = self.folder_tree.selection()
+        if not selected:
+            return
+        self._pending_selected_item = selected[0]
+        if self._pending_select_after_id:
+            self.root.after_cancel(self._pending_select_after_id)
+        self._pending_select_after_id = self.root.after(self.selection_debounce_ms, self._process_tree_selection)
+
+    def _process_tree_selection(self) -> None:
+        self._pending_select_after_id = None
+        if not self._pending_selected_item:
+            return
+        item_id = self._pending_selected_item
+        self._pending_selected_item = None
+        self._apply_tree_selection_from_item_id(item_id)
+
+    def _apply_tree_selection_from_item_id(self, item_id: str) -> None:
+        payload = self.tree_metadata.get(item_id)
+        if not payload:
+            return
+
+        node_type = payload.get("type")
+        if node_type == "root":
+            self.current_scope_label = "全部人物"
+            if self.selected_filter_tags:
+                merged_tf: list[SubfolderEntry] = []
+                for entries in self.person_entries.values():
+                    merged_tf.extend(entries)
+                self.render_entries(merged_tf)
+            else:
+                people = self.store.get_people_folders()
+                want = {p.name for p in people}
+                if want and want == set(self.person_entries.keys()):
+                    merged: list[SubfolderEntry] = []
+                    for p in people:
+                        merged.extend(self.person_entries[p.name])
+                    self.render_entries(merged)
+                else:
+                    self._begin_load_merged_entries()
+        elif node_type == "person":
+            person_folder = payload["path"]
+            self.current_scope_label = person_folder.name
+            cached = self.person_entries.get(person_folder.name)
+            if cached is not None:
+                self.render_entries(cached)
+            else:
+                self._begin_load_person_entries(person_folder)
+        elif node_type == "subfolder":
+            entry = self._entry_for_tree_subfolder(payload)
+            self.current_scope_label = f"{entry.person_name} / {entry.subfolder_name}"
+            self.render_subfolder_media(entry)
+
+    def clear_thumbnail_cards(self) -> None:
+        self._cancel_thumb_yview_debounce()
+        self._thumb_paging_state = None
+        for child in self.thumbnail_scroll.winfo_children():
+            child.destroy()
+
+    def render_entries(self, entries: list[SubfolderEntry], *, reuse_session: Optional[int] = None) -> None:
+        sid = reuse_session if reuse_session is not None else self._new_session()
+        self.current_view_mode = "entries"
+        self.current_subfolder_entry = None
+        self.current_entries = list(entries)
+        self.current_media_items = []
+        self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}")
+        filtered = self._apply_media_entry_filter(self._apply_tag_filter(entries))
+        self.clear_thumbnail_cards()
+        if not filtered:
+            ctk.CTkLabel(self.thumbnail_scroll, text="沒有可顯示的子資料夾").grid(row=0, column=0, padx=16, pady=16, sticky="w")
+            self.set_status("目前標籤／媒體類型篩選下沒有結果")
+            return
+        for col in range(ENTRY_COLUMNS):
+            self.thumbnail_scroll.grid_columnconfigure(col, weight=0, minsize=ENTRY_CARD_SIZE[0] + 16)
+        self._ensure_thumbnail_scroll_hook()
+        self._thumb_paging_state = {"sid": sid, "kind": "entries", "entries": filtered, "next_index": 0}
+        self._thumb_append_entries(self._thumb_paging_state)
+        self.root.after(16, self._try_fill_thumbnail_viewport)
 
     def _create_entry_card(self, row: int, col: int, entry: SubfolderEntry):
         card = ctk.CTkFrame(self.thumbnail_scroll)
@@ -926,40 +1279,27 @@ class PeopleFolderManagerApp:
         except Exception as exc:
             messagebox.showerror("錯誤", f"載入媒體清單失敗：\n{exc}")
             return
-        self.current_media_items = media_items
+        display_items = self._filter_media_items_for_preview(media_items)
+        self.current_media_items = display_items
         if not media_items:
             ctk.CTkLabel(self.thumbnail_scroll, text="此子資料夾內沒有圖片或影片").grid(
                 row=0, column=0, padx=16, pady=16, sticky="w"
             )
             self.set_status("子資料夾內沒有可預覽媒體")
             return
+        if not display_items:
+            ctk.CTkLabel(self.thumbnail_scroll, text="目前媒體類型篩選下沒有符合的項目").grid(
+                row=0, column=0, padx=16, pady=16, sticky="w"
+            )
+            self.set_status("篩選後沒有可預覽媒體")
+            return
         for col in range(MEDIA_COLUMNS):
             self.thumbnail_scroll.grid_columnconfigure(col, weight=1)
-        self._perf_log("media_items_scan_done", scan_start, extra=f"count={len(media_items)}")
-        self._render_media_batch(entry, media_items, sid, 0)
-
-    def _render_media_batch(self, entry: SubfolderEntry, media_items: list[MediaItem], sid: int, start: int) -> None:
-        if not self._is_active_session(sid):
-            return
-        batch_size = MEDIA_BATCH_FIRST if start == 0 else MEDIA_BATCH_SIZE
-        end = min(start + batch_size, len(media_items))
-        for idx in range(start, end):
-            item = media_items[idx]
-            row = idx // MEDIA_COLUMNS
-            col = idx % MEDIA_COLUMNS
-            card, image_label = self._create_media_card(row, col, item)
-            for widget in (card, image_label):
-                widget.bind("<Button-3>", lambda e, x=entry: self.show_context_menu_for_entry(e, x))
-            fut = self.thumb_executor.submit(self.thumbnail_service.get_file_thumbnail, item.media_path, item.media_type, MEDIA_THUMBNAIL_SIZE)
-            fut.add_done_callback(
-                lambda f, session_id=sid, lbl=image_label: self._enqueue_ui_task(
-                    self._apply_thumbnail, session_id, lbl, f, MEDIA_THUMBNAIL_SIZE
-                )
-            )
-
-        self.set_status(f"顯示 {end}/{len(media_items)} 個媒體檔案")
-        if end < len(media_items):
-            self.root.after(NEXT_BATCH_DELAY_MS, lambda: self._render_media_batch(entry, media_items, sid, end))
+        self._perf_log("media_items_scan_done", scan_start, extra=f"count={len(display_items)}")
+        self._ensure_thumbnail_scroll_hook()
+        self._thumb_paging_state = {"sid": sid, "kind": "media", "items": display_items, "entry": entry, "next_index": 0}
+        self._thumb_append_media(self._thumb_paging_state)
+        self.root.after(16, self._try_fill_thumbnail_viewport)
 
     def _create_media_card(self, row: int, col: int, item: MediaItem):
         card = ctk.CTkFrame(self.thumbnail_scroll)
@@ -983,6 +1323,14 @@ class PeopleFolderManagerApp:
             row=2, column=0, padx=8, pady=(2, 8), sticky="ew"
         )
         return card, image_label
+
+    def _bind_media_card_context_menu(self, card: ctk.CTkFrame, item: MediaItem) -> None:
+        def handler(event: tk.Event, m: MediaItem = item) -> None:
+            self.show_context_menu_for_media(event, m)
+
+        card.bind("<Button-3>", handler)
+        for child in card.winfo_children():
+            child.bind("<Button-3>", handler)
 
     def _apply_thumbnail(
         self, sid: int, image_label: ctk.CTkLabel, future, display_size: tuple[int, int]
@@ -1057,10 +1405,7 @@ class PeopleFolderManagerApp:
 
     def on_filter_changed(self) -> None:
         self.selected_filter_tags = {tag for tag, var in self.filter_vars.items() if var.get()}
-        self.refresh_tree()
-        if self.current_view_mode == "media" and self.current_subfolder_entry is not None:
-            if self._relative_key_matches_tag_filter(self.current_subfolder_entry.relative_key):
-                self.render_subfolder_media(self.current_subfolder_entry)
+        self._refresh_tree_and_reload_selection()
 
     def _apply_tag_filter(self, entries: list[SubfolderEntry]) -> list[SubfolderEntry]:
         if not self.selected_filter_tags:
@@ -1080,12 +1425,18 @@ class PeopleFolderManagerApp:
         payload = self.tree_metadata.get(row)
         if not payload:
             return
+        self._context_media_item = None
         node_type = payload.get("type")
+        if node_type == "stub":
+            return
         if node_type == "subfolder":
-            self._context_target = payload.get("entry")
+            self._context_target = self._entry_for_tree_subfolder(payload)
             self.context_menu.entryconfig("添加標籤", state="normal")
             self.context_menu.entryconfig("打開目標資料夾", state="normal")
+            self.context_menu.entryconfig("重新命名資料夾", state="normal")
+            self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
+            self.context_menu.entryconfig("刪除資料夾", state="normal")
         elif node_type == "person":
             person_folder = payload.get("path")
             person_entry = SubfolderEntry(
@@ -1100,7 +1451,10 @@ class PeopleFolderManagerApp:
             self._context_target = person_entry
             self.context_menu.entryconfig("添加標籤", state="disabled")
             self.context_menu.entryconfig("打開目標資料夾", state="normal")
+            self.context_menu.entryconfig("重新命名資料夾", state="normal")
+            self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
+            self.context_menu.entryconfig("刪除資料夾", state="normal")
         else:
             self._context_target = None
             return
@@ -1108,9 +1462,24 @@ class PeopleFolderManagerApp:
 
     def show_context_menu_for_entry(self, event, entry: SubfolderEntry) -> None:
         self._context_target = entry
+        self._context_media_item = None
         self.context_menu.entryconfig("添加標籤", state="normal")
         self.context_menu.entryconfig("打開目標資料夾", state="normal")
+        self.context_menu.entryconfig("重新命名資料夾", state="normal")
+        self.context_menu.entryconfig("重新命名檔案", state="disabled")
         self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
+        self.context_menu.entryconfig("刪除資料夾", state="normal")
+        self.context_menu.post(event.x_root, event.y_root)
+
+    def show_context_menu_for_media(self, event, item: MediaItem) -> None:
+        self._context_target = self.current_subfolder_entry
+        self._context_media_item = item
+        self.context_menu.entryconfig("添加標籤", state="disabled")
+        self.context_menu.entryconfig("打開目標資料夾", state="normal")
+        self.context_menu.entryconfig("重新命名資料夾", state="disabled")
+        self.context_menu.entryconfig("重新命名檔案", state="normal")
+        self.context_menu.entryconfig("轉移資料夾內容到…", state="disabled")
+        self.context_menu.entryconfig("刪除資料夾", state="disabled")
         self.context_menu.post(event.x_root, event.y_root)
 
     def add_tags_to_current_target(self) -> None:
@@ -1141,6 +1510,133 @@ class PeopleFolderManagerApp:
             self.set_status(f"已打開資料夾：{entry.subfolder_path}")
         except Exception as exc:
             messagebox.showerror("錯誤", f"無法打開資料夾：\n{exc}")
+
+    def rename_current_target_folder(self) -> None:
+        if self._context_media_item is not None:
+            return
+        entry = self._context_target
+        if not entry:
+            return
+        root = self.store.ensure_root_folder()
+        folder = Path(entry.subfolder_path).resolve()
+        try:
+            folder.relative_to(Path(root).resolve())
+        except ValueError:
+            messagebox.showerror("錯誤", "只能重新命名主資料夾底下的項目。")
+            return
+        if not folder.is_dir():
+            messagebox.showerror("錯誤", "目標不是資料夾。")
+            return
+        if folder == Path(root).resolve():
+            messagebox.showwarning("警告", "不可重新命名主資料夾。")
+            return
+
+        old_name = folder.name
+        new_name = simpledialog.askstring(
+            "重新命名資料夾",
+            f"新資料夾名稱（目前：{old_name}）",
+            initialvalue=old_name,
+            parent=self.root,
+        )
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if new_name == old_name:
+            return
+        if not self._is_valid_folder_basename(new_name):
+            messagebox.showwarning("警告", "名稱無效：不可為空，且不可包含 \\ / : * ? \" < > | 等字元。")
+            return
+        new_path = folder.parent / new_name
+        if new_path.exists():
+            messagebox.showerror("錯誤", "已存在相同名稱的項目。")
+            return
+
+        try:
+            old_rel = self.store.to_relative_key(folder)
+        except Exception:
+            old_rel = ""
+        try:
+            folder.rename(new_path)
+        except OSError as exc:
+            messagebox.showerror("重新命名失敗", str(exc))
+            return
+
+        try:
+            new_rel = self.store.to_relative_key(new_path)
+        except Exception:
+            new_rel = ""
+        if old_rel and new_rel:
+            self.tag_repo.rename_relative_path_root(old_rel, new_rel)
+
+        self.store.clear_cache()
+        media_snap = self._snapshot_media_view()
+        was_same_media_folder = (
+            media_snap is not None and Path(media_snap.subfolder_path).resolve() == folder
+        )
+        tree_state = self._tree_state_after_folder_rename(folder, new_path, self._capture_tree_state())
+        self.refresh_tree(restore_state=tree_state)
+        root_res = Path(root).resolve()
+        if was_same_media_folder and media_snap is not None:
+            person_name = new_path.name if new_path.parent == root_res else media_snap.person_name
+            self.render_subfolder_media(self._build_entry_for_folder(new_path, person_name))
+        elif media_snap is not None:
+            try:
+                old_r = folder.resolve()
+                view_r = Path(media_snap.subfolder_path).resolve()
+                rel = view_r.relative_to(old_r)
+                np = new_path / rel
+                if np.is_dir():
+                    if old_r.parent == root_res:
+                        person_name = new_path.name
+                    else:
+                        person_name = media_snap.person_name
+                    self.render_subfolder_media(self._build_entry_for_folder(np, person_name))
+                else:
+                    self._restore_media_view_if_needed(media_snap)
+            except ValueError:
+                self._restore_media_view_if_needed(media_snap)
+        else:
+            self._restore_media_view_if_needed(media_snap)
+        self.set_status(f"已重新命名資料夾：{old_name} → {new_name}")
+
+    def rename_current_target_file(self) -> None:
+        item = self._context_media_item
+        if item is None:
+            return
+        path = Path(item.media_path).resolve()
+        if not path.is_file():
+            messagebox.showerror("錯誤", "找不到此檔案。")
+            return
+        suffix = path.suffix
+        old_stem = path.stem
+        new_stem = simpledialog.askstring(
+            "重新命名檔案",
+            f"新主檔名（副檔名將維持為 {suffix or '（無）'}）",
+            initialvalue=old_stem,
+            parent=self.root,
+        )
+        if new_stem is None:
+            return
+        new_stem = new_stem.strip()
+        if not self._is_valid_file_stem(new_stem):
+            messagebox.showwarning("警告", "主檔名無效：不可為空，且不可包含 \\ / : * ? \" < > | 等字元。")
+            return
+        new_path = path.parent / (new_stem + suffix)
+        if new_path.resolve() == path:
+            return
+        if new_path.exists():
+            messagebox.showerror("錯誤", "已存在同名檔案。")
+            return
+        try:
+            path.rename(new_path)
+        except OSError as exc:
+            messagebox.showerror("重新命名失敗", str(exc))
+            return
+        self.store.invalidate_folder_cache(path.parent)
+        cur = self.current_subfolder_entry
+        if cur is not None and self.current_view_mode == "media":
+            self.render_subfolder_media(cur)
+        self.set_status(f"已重新命名檔案：{path.name} → {new_path.name}")
 
     def transfer_current_target_folder(self) -> None:
         entry = self._context_target
