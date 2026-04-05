@@ -8,6 +8,7 @@ import json
 import os
 import queue
 import shutil
+import sys
 import subprocess
 import threading
 import time
@@ -408,7 +409,7 @@ class PeopleFolderManagerApp:
 
         self.folder_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.folder_tree.bind("<<TreeviewOpen>>", self.on_tree_open)
-        self.folder_tree.bind("<Button-3>", self.on_tree_right_click)
+        self._bind_right_click_menu(self.folder_tree, self.on_tree_right_click)
 
         right_frame = ctk.CTkFrame(body)
         right_frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=8)
@@ -511,6 +512,13 @@ class PeopleFolderManagerApp:
 
     def set_status(self, message: str) -> None:
         self.status_label.configure(text=message)
+
+    def _bind_right_click_menu(self, widget, callback) -> None:
+        """macOS 上次要鍵多為 Button-2；Windows／Linux 為 Button-3；觸控板可為 Control+左鍵。"""
+        widget.bind("<Button-2>", callback)
+        widget.bind("<Button-3>", callback)
+        if sys.platform == "darwin":
+            widget.bind("<Control-Button-1>", callback)
 
     def _snapshot_media_view(self) -> Optional[SubfolderEntry]:
         if self.current_view_mode == "media" and self.current_subfolder_entry is not None:
@@ -1028,8 +1036,10 @@ class PeopleFolderManagerApp:
             row = idx // ENTRY_COLUMNS
             col = idx % ENTRY_COLUMNS
             card, image_label = self._create_entry_card(row, col, entry)
-            for widget in (card, image_label):
-                widget.bind("<Button-3>", lambda e, x=entry: self.show_context_menu_for_entry(e, x))
+            entry_menu = lambda e, x=entry: self.show_context_menu_for_entry(e, x)
+            self._bind_right_click_menu(card, entry_menu)
+            for child in card.winfo_children():
+                self._bind_right_click_menu(child, entry_menu)
             fut = self.thumb_executor.submit(self.thumbnail_service.get_entry_thumbnail, entry)
             fut.add_done_callback(
                 lambda f, session_id=sid, lbl=image_label: self._enqueue_ui_task(
@@ -1328,9 +1338,9 @@ class PeopleFolderManagerApp:
         def handler(event: tk.Event, m: MediaItem = item) -> None:
             self.show_context_menu_for_media(event, m)
 
-        card.bind("<Button-3>", handler)
+        self._bind_right_click_menu(card, handler)
         for child in card.winfo_children():
-            child.bind("<Button-3>", handler)
+            self._bind_right_click_menu(child, handler)
 
     def _apply_thumbnail(
         self, sid: int, image_label: ctk.CTkLabel, future, display_size: tuple[int, int]
