@@ -8,11 +8,17 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15-intel, macos-latest]
+        include:
+          # Intel 處理器 Mac（x86_64）— 請勿在 Apple Silicon 上當主程式使用（會顯示不支援）
+          - runner: macos-15-intel
+            package_label: Intel-x86_64
+          # M1 / M2 / M3 等 Apple Silicon（arm64）
+          - runner: macos-latest
+            package_label: AppleSilicon-arm64
 
     steps:
       - name: Checkout
@@ -41,10 +47,11 @@ jobs:
 
       - name: Package app
         run: |
+          ZIP_NAME="PeopleFolderManager-${{ matrix.package_label }}.zip"
           if [ -d "dist/PeopleFolderManager.app" ]; then
-            ditto -c -k --sequesterRsrc --keepParent "dist/PeopleFolderManager.app" "PeopleFolderManager-${{ matrix.os }}.zip"
+            ditto -c -k --sequesterRsrc --keepParent "dist/PeopleFolderManager.app" "$ZIP_NAME"
           elif [ -e "dist/PeopleFolderManager" ]; then
-            ditto -c -k --sequesterRsrc --keepParent "dist/PeopleFolderManager" "PeopleFolderManager-${{ matrix.os }}.zip"
+            ditto -c -k --sequesterRsrc --keepParent "dist/PeopleFolderManager" "$ZIP_NAME"
           else
             echo "Build output not found in dist/"
             exit 1
@@ -53,5 +60,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: PeopleFolderManager-${{ matrix.os }}
-          path: PeopleFolderManager-${{ matrix.os }}.zip
+          name: PeopleFolderManager-${{ matrix.package_label }}
+          path: PeopleFolderManager-${{ matrix.package_label }}.zip
