@@ -1,0 +1,57 @@
+name: Build macOS (PeopleFolderManager)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "people-v*"
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r folder_manage/requirements.txt pyinstaller
+          python -V
+          pip -V
+          pip freeze
+
+      - name: Build app
+        run: |
+          pyinstaller people_folder_manager.spec
+
+      - name: Show dist output
+        run: |
+          ls -la dist || true
+
+      - name: Package app
+        run: |
+          if [ -d "dist/PeopleFolderManager.app" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "dist/PeopleFolderManager.app" "PeopleFolderManager-${{ matrix.os }}.zip"
+          elif [ -e "dist/PeopleFolderManager" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "dist/PeopleFolderManager" "PeopleFolderManager-${{ matrix.os }}.zip"
+          else
+            echo "Build output not found in dist/"
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PeopleFolderManager-${{ matrix.os }}
+          path: PeopleFolderManager-${{ matrix.os }}.zip
