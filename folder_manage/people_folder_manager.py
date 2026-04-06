@@ -365,6 +365,7 @@ class PeopleFolderManagerApp:
         self.current_entries: list[SubfolderEntry] = []
         self.current_media_items: list[MediaItem] = []
         self.current_scope_label = "未選擇"
+        self.current_scope_path: Optional[Path] = None
         self.current_view_mode = "entries"
         self._thumb_paging_state: Optional[dict] = None
         self._thumb_scroll_hooked = False
@@ -388,6 +389,7 @@ class PeopleFolderManagerApp:
         self._drag_state: Optional[dict] = None
         self._drag_hint_win: Optional[tk.Toplevel] = None
         self._insert_indicator: Optional[tk.Frame] = None
+        self._suppress_tree_select_once = False
 
         self.load_session_id = 0
         self.active_session_id = 0
@@ -498,8 +500,13 @@ class PeopleFolderManagerApp:
         right_frame.grid_rowconfigure(2, weight=1)
         right_frame.grid_columnconfigure(0, weight=1)
 
-        self.scope_label = ctk.CTkLabel(right_frame, text="目前檢視：未選擇", anchor="w", font=("Arial", 12, "bold"))
-        self.scope_label.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+        scope_row = ctk.CTkFrame(right_frame, fg_color="transparent")
+        scope_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+        scope_row.grid_columnconfigure(1, weight=1)
+        self.back_up_button = ctk.CTkButton(scope_row, text="← 返回上一層", width=118, command=self.navigate_back_one_level)
+        self.back_up_button.grid(row=0, column=0, padx=(0, 8), sticky="w")
+        self.scope_label = ctk.CTkLabel(scope_row, text="目前檢視：未選擇", anchor="w", font=("Arial", 12, "bold"))
+        self.scope_label.grid(row=0, column=1, sticky="ew")
 
         filter_frame = ctk.CTkFrame(right_frame)
         filter_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
@@ -580,6 +587,74 @@ class PeopleFolderManagerApp:
     def _on_duration_filter_return(self, _event: tk.Event) -> str:
         self.on_apply_duration_filter()
         return "break"
+
+    def _can_navigate_back(self) -> bool:
+        if self.store.root_folder is None or self.current_scope_path is None:
+            return False
+        root = Path(self.store.root_folder).resolve()
+        cur = Path(self.current_scope_path).resolve()
+        return cur != root and root in [cur, *cur.parents]
+
+    def _update_back_buttons_state(self) -> None:
+        st = "normal" if self._can_navigate_back() else "disabled"
+        try:
+            self.back_up_button.configure(state=st)
+        except Exception:
+            pass
+
+    def _reset_preview_scroll_top(self) -> None:
+        try:
+            self.thumbnail_scroll._parent_canvas.yview_moveto(0.0)
+        except Exception:
+            pass
+
+    def _try_sync_tree_selection(self, path_obj: Path) -> None:
+        node_id = self.path_node_index.get(self._path_key(path_obj))
+        if not node_id:
+            return
+        self._suppress_tree_select_once = True
+        try:
+            self.folder_tree.selection_set(node_id)
+            self.folder_tree.focus(node_id)
+            self.folder_tree.see(node_id)
+        except Exception:
+            self._suppress_tree_select_once = False
+
+    def navigate_back_one_level(self) -> None:
+        if not self._can_navigate_back() or self.current_scope_path is None:
+            return
+        root = Path(self.store.root_folder).resolve() if self.store.root_folder else None
+        cur = Path(self.current_scope_path).resolve()
+        parent = cur.parent
+        if root is None:
+            return
+        self._try_sync_tree_selection(parent)
+        if parent == root:
+            self.current_scope_path = root
+            self.current_scope_label = "全部人物"
+            self._begin_load_merged_entries()
+            self._update_back_buttons_state()
+            return
+        children = self.store.get_subfolder_entries_shallow(parent)
+        self.current_scope_path = parent
+        self.current_scope_label = parent.name
+        self.render_entries(children)
+        self._update_back_buttons_state()
+
+    def _open_entry_from_preview(self, entry: SubfolderEntry) -> None:
+        folder = Path(entry.subfolder_path).resolve()
+        self._try_sync_tree_selection(folder)
+        children = self.store.get_subfolders(folder)
+        if children:
+            entries = self.store.get_subfolder_entries_shallow(folder)
+            self.current_scope_path = folder
+            self.current_scope_label = folder.name
+            self.render_entries(entries)
+            self.set_status(f"進入資料夾：{folder.name}")
+            return
+        self.current_scope_path = folder
+        self.current_scope_label = f"{entry.person_name} / {entry.subfolder_name}"
+        self.render_subfolder_media(entry)
 
     def _set_initial_tree_pane_sash(self) -> None:
         try:
@@ -682,7 +757,9 @@ class PeopleFolderManagerApp:
         self.current_media_items = []
         self.current_view_mode = "entries"
         self.current_subfolder_entry = None
+        self.current_scope_path = None
         self.scope_label.configure(text="目前檢視：未選擇")
+        self._update_back_buttons_state()
 
         if self.store.root_folder is None:
             self.set_status("請先選擇主資料夾")
@@ -893,6 +970,8 @@ class PeopleFolderManagerApp:
         else:
             self.clear_thumbnail_cards()
             self.scope_label.configure(text="目前檢視：未選擇")
+            self.current_scope_path = None
+            self._update_back_buttons_state()
             self.set_status("就緒")
 
     def on_media_type_filter_changed(self) -> None:
@@ -1250,6 +1329,7 @@ class PeopleFolderManagerApp:
             self._entry_card_widgets[entry_key] = card
             self._bind_preview_card_selection(card, entry, idx, "entry")
             self._bind_preview_card_drag(card, entry, idx, "entry")
+            self._bind_entry_card_double_click(card, entry)
             entry_menu = lambda e, x=entry: self.show_context_menu_for_entry(e, x)
             self._bind_right_click_menu(card, entry_menu)
             for child in card.winfo_children():
@@ -1376,6 +1456,9 @@ class PeopleFolderManagerApp:
         self.render_entries(entries, reuse_session=sid)
 
     def on_tree_select(self, _event=None) -> None:
+        if self._suppress_tree_select_once:
+            self._suppress_tree_select_once = False
+            return
         selected = self.folder_tree.selection()
         if not selected:
             return
@@ -1400,6 +1483,7 @@ class PeopleFolderManagerApp:
         node_type = payload.get("type")
         if node_type == "root":
             self.current_scope_label = "全部人物"
+            self.current_scope_path = Path(payload["path"]).resolve() if payload.get("path") else None
             if self.selected_filter_tags:
                 merged_tf: list[SubfolderEntry] = []
                 for entries in self.person_entries.values():
@@ -1418,6 +1502,7 @@ class PeopleFolderManagerApp:
         elif node_type == "person":
             person_folder = payload["path"]
             self.current_scope_label = person_folder.name
+            self.current_scope_path = Path(person_folder).resolve()
             cached = self.person_entries.get(person_folder.name)
             if cached is not None:
                 self.render_entries(cached)
@@ -1426,7 +1511,9 @@ class PeopleFolderManagerApp:
         elif node_type == "subfolder":
             entry = self._entry_for_tree_subfolder(payload)
             self.current_scope_label = f"{entry.person_name} / {entry.subfolder_name}"
+            self.current_scope_path = Path(entry.subfolder_path).resolve()
             self.render_subfolder_media(entry)
+        self._update_back_buttons_state()
 
     def clear_thumbnail_cards(self) -> None:
         self._cancel_thumb_yview_debounce()
@@ -1441,6 +1528,7 @@ class PeopleFolderManagerApp:
         self._selection_anchor_index = None
         for child in self.thumbnail_scroll.winfo_children():
             child.destroy()
+        self._reset_preview_scroll_top()
 
     @staticmethod
     def _is_macos_platform() -> bool:
@@ -1755,6 +1843,17 @@ class PeopleFolderManagerApp:
 
         bind_tree(card)
 
+    def _bind_entry_card_double_click(self, card: ctk.CTkFrame, entry: SubfolderEntry) -> None:
+        def on_double(_event: tk.Event, e: SubfolderEntry = entry) -> None:
+            self._open_entry_from_preview(e)
+
+        def bind_tree(w: tk.Misc) -> None:
+            w.bind("<Double-1>", on_double, add="+")
+            for ch in w.winfo_children():
+                bind_tree(ch)
+
+        bind_tree(card)
+
     def render_entries(self, entries: list[SubfolderEntry], *, reuse_session: Optional[int] = None) -> None:
         sid = reuse_session if reuse_session is not None else self._new_session()
         self.current_view_mode = "entries"
@@ -1762,10 +1861,13 @@ class PeopleFolderManagerApp:
         self.current_entries = list(entries)
         self.current_media_items = []
         self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}")
+        self._update_back_buttons_state()
         filtered = self._apply_media_entry_filter(self._apply_tag_filter(entries))
         self.clear_thumbnail_cards()
         if not filtered:
-            ctk.CTkLabel(self.thumbnail_scroll, text="沒有可顯示的子資料夾").grid(row=0, column=0, padx=16, pady=16, sticky="w")
+            ctk.CTkLabel(self.thumbnail_scroll, text="沒有可顯示的子資料夾").grid(
+                row=0, column=0, padx=16, pady=16, sticky="w"
+            )
             self.set_status("目前標籤／媒體類型篩選下沒有結果")
             return
         for col in range(ENTRY_COLUMNS):
@@ -1814,9 +1916,12 @@ class PeopleFolderManagerApp:
         self.current_entries = [entry]
         self.current_scope_label = f"{entry.person_name} / {entry.subfolder_name}"
         self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}（媒體預覽）")
+        self._update_back_buttons_state()
         self.clear_thumbnail_cards()
         self.current_media_items = []
-        ctk.CTkLabel(self.thumbnail_scroll, text="載入中...").grid(row=0, column=0, padx=12, pady=12, sticky="w")
+        ctk.CTkLabel(self.thumbnail_scroll, text="載入中...").grid(
+            row=0, column=0, padx=12, pady=12, sticky="w"
+        )
         self.set_status("正在掃描子資料夾媒體...")
 
         start = self._perf_start()
