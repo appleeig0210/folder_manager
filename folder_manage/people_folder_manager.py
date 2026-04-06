@@ -13,6 +13,7 @@ import sys
 import subprocess
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -384,6 +385,9 @@ class PeopleFolderManagerApp:
         self._entry_card_widgets: dict[str, ctk.CTkFrame] = {}
         self._media_card_widgets: dict[str, ctk.CTkFrame] = {}
         self._selection_anchor_index: Optional[int] = None
+        self._drag_state: Optional[dict] = None
+        self._drag_hint_win: Optional[tk.Toplevel] = None
+        self._insert_indicator: Optional[tk.Frame] = None
 
         self.load_session_id = 0
         self.active_session_id = 0
@@ -561,12 +565,15 @@ class PeopleFolderManagerApp:
         self.status_label.pack(side="left", padx=10, pady=6)
 
         self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="新增資料夾…", command=self.create_folder_under_current_target)
+        self.context_menu.add_separator()
         self.context_menu.add_command(label="添加標籤", command=self.add_tags_to_current_target)
         self.context_menu.add_command(label="打開目標資料夾", command=self.open_current_target_folder)
         self.context_menu.add_command(label="重新命名資料夾", command=self.rename_current_target_folder)
         self.context_menu.add_command(label="重新命名檔案", command=self.rename_current_target_file)
         self.context_menu.add_command(label="轉移資料夾內容到…", command=self.transfer_current_target_folder)
         self.context_menu.add_command(label="轉移已選取項目到…", command=self.transfer_selected_preview_items)
+        self.context_menu.add_command(label="重新命名與添加序號…", command=self.rename_and_number_selected)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="刪除資料夾", command=self.delete_current_target_folder)
 
@@ -1242,6 +1249,7 @@ class PeopleFolderManagerApp:
             entry_key = self._item_key_for_entry(entry)
             self._entry_card_widgets[entry_key] = card
             self._bind_preview_card_selection(card, entry, idx, "entry")
+            self._bind_preview_card_drag(card, entry, idx, "entry")
             entry_menu = lambda e, x=entry: self.show_context_menu_for_entry(e, x)
             self._bind_right_click_menu(card, entry_menu)
             for child in card.winfo_children():
@@ -1275,6 +1283,7 @@ class PeopleFolderManagerApp:
             media_key = self._item_key_for_media(item)
             self._media_card_widgets[media_key] = card
             self._bind_preview_card_selection(card, item, idx, "media")
+            self._bind_preview_card_drag(card, item, idx, "media")
             self._bind_media_card_context_menu(card, item)
             self._bind_media_card_double_click_open(card, item)
             fut = self.thumb_executor.submit(
@@ -1422,6 +1431,9 @@ class PeopleFolderManagerApp:
     def clear_thumbnail_cards(self) -> None:
         self._cancel_thumb_yview_debounce()
         self._thumb_paging_state = None
+        self._drag_state = None
+        self._hide_drag_hint()
+        self._hide_insert_indicator()
         self.selected_entry_keys.clear()
         self.selected_media_paths.clear()
         self._entry_card_widgets.clear()
@@ -1476,6 +1488,11 @@ class PeopleFolderManagerApp:
 
         def select_single(_event: tk.Event) -> None:
             key = get_key()
+            # 拖曳多選群組時，按在既有選取項上不先清空成單選
+            if kind == "entry" and len(self.selected_entry_keys) > 1 and key in self.selected_entry_keys:
+                return
+            if kind == "media" and len(self.selected_media_paths) > 1 and key in self.selected_media_paths:
+                return
             if kind == "entry":
                 self.selected_entry_keys = {key}
                 self.selected_media_paths.clear()
@@ -1524,6 +1541,215 @@ class PeopleFolderManagerApp:
                 w.bind("<Command-Button-1>", toggle_one)
             else:
                 w.bind("<Control-Button-1>", toggle_one)
+            for ch in w.winfo_children():
+                bind_tree(ch)
+
+        bind_tree(card)
+
+    def _ensure_selected_for_drag(self, kind: str, item_key: str, idx: int) -> None:
+        if kind == "entry":
+            if item_key not in self.selected_entry_keys:
+                self.selected_entry_keys = {item_key}
+                self.selected_media_paths.clear()
+        else:
+            if item_key not in self.selected_media_paths:
+                self.selected_media_paths = {item_key}
+                self.selected_entry_keys.clear()
+        self._selection_anchor_index = idx
+        self._refresh_preview_selection_styles()
+
+    def _preview_selected_keys(self, kind: str) -> set[str]:
+        return set(self.selected_entry_keys if kind == "entry" else self.selected_media_paths)
+
+    def _show_drag_hint(self, text: str, x_root: int, y_root: int) -> None:
+        self._hide_drag_hint()
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        try:
+            win.attributes("-alpha", 0.72)
+        except tk.TclError:
+            pass
+        label = tk.Label(
+            win,
+            text=text,
+            bg="#2d5f8f",
+            fg="white",
+            padx=10,
+            pady=6,
+            font=("Arial", 11, "bold"),
+        )
+        label.pack()
+        win.geometry(f"+{x_root + 14}+{y_root + 14}")
+        self._drag_hint_win = win
+
+    def _move_drag_hint(self, x_root: int, y_root: int) -> None:
+        if self._drag_hint_win is None:
+            return
+        try:
+            self._drag_hint_win.geometry(f"+{x_root + 14}+{y_root + 14}")
+        except tk.TclError:
+            self._drag_hint_win = None
+
+    def _hide_drag_hint(self) -> None:
+        if self._drag_hint_win is None:
+            return
+        try:
+            self._drag_hint_win.destroy()
+        except Exception:
+            pass
+        self._drag_hint_win = None
+
+    def _ensure_insert_indicator(self) -> tk.Frame:
+        if self._insert_indicator is None or not self._insert_indicator.winfo_exists():
+            self._insert_indicator = tk.Frame(self.thumbnail_scroll, bg="#2ea3ff", width=3, height=12, bd=0, highlightthickness=0)
+        return self._insert_indicator
+
+    def _hide_insert_indicator(self) -> None:
+        if self._insert_indicator is None:
+            return
+        try:
+            self._insert_indicator.place_forget()
+        except Exception:
+            pass
+
+    def _preview_cards_in_order(self, kind: str, ordered_keys: list[str]) -> list[ctk.CTkFrame]:
+        mapping = self._entry_card_widgets if kind == "entry" else self._media_card_widgets
+        out: list[ctk.CTkFrame] = []
+        for key in ordered_keys:
+            card = mapping.get(key)
+            if card is not None and card.winfo_exists():
+                out.append(card)
+        return out
+
+    def _compute_drop_index(self, kind: str, x_root: int, y_root: int, ordered_keys: list[str]) -> int:
+        cards = self._preview_cards_in_order(kind, ordered_keys)
+        if not cards:
+            return 0
+        frame_x = self.thumbnail_scroll.winfo_rootx()
+        frame_y = self.thumbnail_scroll.winfo_rooty()
+        x = x_root - frame_x
+        y = y_root - frame_y
+        centers: list[tuple[float, int, ctk.CTkFrame]] = []
+        for i, c in enumerate(cards):
+            cx = c.winfo_x() + (c.winfo_width() / 2)
+            cy = c.winfo_y() + (c.winfo_height() / 2)
+            d = (cx - x) ** 2 + (cy - y) ** 2
+            centers.append((d, i, c))
+        centers.sort(key=lambda t: t[0])
+        _, nearest_index, nearest_card = centers[0]
+        before = x < (nearest_card.winfo_x() + nearest_card.winfo_width() / 2)
+        insert_index = nearest_index if before else nearest_index + 1
+
+        ind = self._ensure_insert_indicator()
+        if insert_index >= len(cards):
+            ref = cards[-1]
+            px = ref.winfo_x() + ref.winfo_width() + 4
+            py = ref.winfo_y() + 6
+            ph = max(10, ref.winfo_height() - 12)
+        else:
+            ref = cards[insert_index]
+            px = max(4, ref.winfo_x() - 4)
+            py = ref.winfo_y() + 6
+            ph = max(10, ref.winfo_height() - 12)
+        ind.place(x=px, y=py, width=3, height=ph)
+        return max(0, min(insert_index, len(ordered_keys)))
+
+    @staticmethod
+    def _reorder_by_keys(items: list, item_keys: list[str], selected_keys: set[str], insert_index: int) -> list:
+        selected_pairs = [(it, k) for it, k in zip(items, item_keys) if k in selected_keys]
+        remain_pairs = [(it, k) for it, k in zip(items, item_keys) if k not in selected_keys]
+        before_count = sum(1 for i, k in enumerate(item_keys[:insert_index]) if k in selected_keys)
+        target = max(0, min(len(remain_pairs), insert_index - before_count))
+        new_pairs = remain_pairs[:target] + selected_pairs + remain_pairs[target:]
+        return [p[0] for p in new_pairs]
+
+    def _render_media_from_current_items(self, reuse_session: Optional[int] = None) -> None:
+        sid = reuse_session if reuse_session is not None else self._new_session()
+        entry = self.current_subfolder_entry
+        if entry is None:
+            return
+        display_items = list(self.current_media_items)
+        self.clear_thumbnail_cards()
+        if not display_items:
+            ctk.CTkLabel(self.thumbnail_scroll, text="目前篩選條件下沒有符合的媒體項目").grid(
+                row=0, column=0, padx=16, pady=16, sticky="w"
+            )
+            return
+        for col in range(MEDIA_COLUMNS):
+            self.thumbnail_scroll.grid_columnconfigure(col, weight=1)
+        self._ensure_thumbnail_scroll_hook()
+        self._thumb_paging_state = {"sid": sid, "kind": "media", "items": display_items, "entry": entry, "next_index": 0}
+        self._thumb_append_media(self._thumb_paging_state)
+        self.root.after(16, self._try_fill_thumbnail_viewport)
+
+    def _bind_preview_card_drag(self, card: ctk.CTkFrame, item, idx: int, kind: str) -> None:
+        def key_of() -> str:
+            return self._item_key_for_entry(item) if kind == "entry" else self._item_key_for_media(item)
+
+        def on_press(event: tk.Event) -> None:
+            key = key_of()
+            self._ensure_selected_for_drag(kind, key, idx)
+            self._drag_state = {
+                "kind": kind,
+                "start_x_root": event.x_root,
+                "start_y_root": event.y_root,
+                "dragging": False,
+                "insert_index": None,
+            }
+
+        def on_motion(event: tk.Event) -> None:
+            st = self._drag_state
+            if not st or st.get("kind") != kind:
+                return
+            dx = abs(event.x_root - st["start_x_root"])
+            dy = abs(event.y_root - st["start_y_root"])
+            if not st["dragging"] and (dx + dy) < 8:
+                return
+            if not st["dragging"]:
+                st["dragging"] = True
+                count = len(self._preview_selected_keys(kind))
+                self._show_drag_hint(f"移動 {count} 個項目", event.x_root, event.y_root)
+            self._move_drag_hint(event.x_root, event.y_root)
+            keys_order = self._selection_keys_order()
+            st["insert_index"] = self._compute_drop_index(kind, event.x_root, event.y_root, keys_order)
+
+        def on_release(_event: tk.Event) -> None:
+            st = self._drag_state
+            self._drag_state = None
+            if not st:
+                self._hide_drag_hint()
+                self._hide_insert_indicator()
+                return
+            dragging = bool(st.get("dragging"))
+            insert_index = st.get("insert_index")
+            self._hide_drag_hint()
+            self._hide_insert_indicator()
+            if not dragging or insert_index is None:
+                return
+            if kind == "entry":
+                st2 = self._thumb_paging_state or {}
+                items = list(st2.get("entries", self.current_entries))
+                keys = [self._item_key_for_entry(x) for x in items]
+                selected = set(self.selected_entry_keys)
+                if not selected:
+                    return
+                reordered = self._reorder_by_keys(items, keys, selected, int(insert_index))
+                self.current_entries = reordered
+                self.render_entries(self.current_entries)
+            else:
+                st2 = self._thumb_paging_state or {}
+                items = list(st2.get("items", self.current_media_items))
+                keys = [self._item_key_for_media(x) for x in items]
+                selected = set(self.selected_media_paths)
+                if not selected:
+                    return
+                self.current_media_items = self._reorder_by_keys(items, keys, selected, int(insert_index))
+                self._render_media_from_current_items()
+
+        def bind_tree(w: tk.Misc) -> None:
+            w.bind("<ButtonPress-1>", on_press, add="+")
+            w.bind("<B1-Motion>", on_motion, add="+")
+            w.bind("<ButtonRelease-1>", on_release, add="+")
             for ch in w.winfo_children():
                 bind_tree(ch)
 
@@ -1837,14 +2063,37 @@ class PeopleFolderManagerApp:
         node_type = payload.get("type")
         if node_type == "stub":
             return
-        if node_type == "subfolder":
+        if node_type == "root":
+            root_folder = payload.get("path")
+            root_entry = SubfolderEntry(
+                person_name=root_folder.name,
+                subfolder_name=root_folder.name,
+                subfolder_path=root_folder,
+                relative_key="",
+                preview_path=None,
+                preview_type=None,
+                media_count=0,
+            )
+            self._context_target = root_entry
+            self.context_menu.entryconfig("新增資料夾…", state="normal")
+            self.context_menu.entryconfig("添加標籤", state="disabled")
+            self.context_menu.entryconfig("打開目標資料夾", state="normal")
+            self.context_menu.entryconfig("重新命名資料夾", state="disabled")
+            self.context_menu.entryconfig("重新命名檔案", state="disabled")
+            self.context_menu.entryconfig("轉移資料夾內容到…", state="disabled")
+            self.context_menu.entryconfig("轉移已選取項目到…", state="disabled")
+            self.context_menu.entryconfig("重新命名與添加序號…", state="disabled")
+            self.context_menu.entryconfig("刪除資料夾", state="disabled")
+        elif node_type == "subfolder":
             self._context_target = self._entry_for_tree_subfolder(payload)
+            self.context_menu.entryconfig("新增資料夾…", state="normal")
             self.context_menu.entryconfig("添加標籤", state="normal")
             self.context_menu.entryconfig("打開目標資料夾", state="normal")
             self.context_menu.entryconfig("重新命名資料夾", state="normal")
             self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
             self.context_menu.entryconfig("轉移已選取項目到…", state="disabled")
+            self.context_menu.entryconfig("重新命名與添加序號…", state="disabled")
             self.context_menu.entryconfig("刪除資料夾", state="normal")
         elif node_type == "person":
             person_folder = payload.get("path")
@@ -1858,12 +2107,14 @@ class PeopleFolderManagerApp:
                 media_count=0,
             )
             self._context_target = person_entry
+            self.context_menu.entryconfig("新增資料夾…", state="normal")
             self.context_menu.entryconfig("添加標籤", state="disabled")
             self.context_menu.entryconfig("打開目標資料夾", state="normal")
             self.context_menu.entryconfig("重新命名資料夾", state="normal")
             self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
             self.context_menu.entryconfig("轉移已選取項目到…", state="disabled")
+            self.context_menu.entryconfig("重新命名與添加序號…", state="disabled")
             self.context_menu.entryconfig("刪除資料夾", state="normal")
         else:
             self._context_target = None
@@ -1878,12 +2129,14 @@ class PeopleFolderManagerApp:
             self._refresh_preview_selection_styles()
         self._context_target = entry
         self._context_media_item = None
+        self.context_menu.entryconfig("新增資料夾…", state="normal")
         self.context_menu.entryconfig("添加標籤", state="normal")
         self.context_menu.entryconfig("打開目標資料夾", state="normal")
         self.context_menu.entryconfig("重新命名資料夾", state="normal")
         self.context_menu.entryconfig("重新命名檔案", state="disabled")
         self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
         self.context_menu.entryconfig("轉移已選取項目到…", state="normal")
+        self.context_menu.entryconfig("重新命名與添加序號…", state="normal")
         self.context_menu.entryconfig("刪除資料夾", state="normal")
         self.context_menu.post(event.x_root, event.y_root)
 
@@ -1895,12 +2148,14 @@ class PeopleFolderManagerApp:
             self._refresh_preview_selection_styles()
         self._context_target = self.current_subfolder_entry
         self._context_media_item = item
+        self.context_menu.entryconfig("新增資料夾…", state="disabled")
         self.context_menu.entryconfig("添加標籤", state="disabled")
         self.context_menu.entryconfig("打開目標資料夾", state="normal")
         self.context_menu.entryconfig("重新命名資料夾", state="disabled")
         self.context_menu.entryconfig("重新命名檔案", state="normal")
         self.context_menu.entryconfig("轉移資料夾內容到…", state="disabled")
         self.context_menu.entryconfig("轉移已選取項目到…", state="normal")
+        self.context_menu.entryconfig("重新命名與添加序號…", state="normal")
         self.context_menu.entryconfig("刪除資料夾", state="disabled")
         self.context_menu.post(event.x_root, event.y_root)
 
@@ -1922,6 +2177,45 @@ class PeopleFolderManagerApp:
         self.refresh_tree(restore_state=self._capture_tree_state())
         self._restore_media_view_if_needed(media_snap)
         self.set_status(f"已更新標籤：{entry.subfolder_name} -> {', '.join(merged)}")
+
+    def create_folder_under_current_target(self) -> None:
+        entry = self._context_target
+        if not entry:
+            messagebox.showwarning("警告", "請先在左側樹狀圖選擇一個資料夾層級。")
+            return
+        parent_folder = Path(entry.subfolder_path).resolve()
+        if not parent_folder.is_dir():
+            messagebox.showerror("錯誤", "目標層級不存在或不是資料夾。")
+            return
+
+        new_name = simpledialog.askstring(
+            "新增資料夾",
+            f"要在「{parent_folder.name}」底下建立的新資料夾名稱：",
+            parent=self.root,
+        )
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not self._is_valid_folder_basename(new_name):
+            messagebox.showwarning("警告", "名稱無效：不可為空，且不可包含 \\ / : * ? \" < > | 等字元。")
+            return
+
+        new_path = parent_folder / new_name
+        if new_path.exists():
+            messagebox.showerror("錯誤", f"已存在同名項目：{new_name}")
+            return
+        try:
+            new_path.mkdir(parents=False, exist_ok=False)
+        except OSError as exc:
+            messagebox.showerror("新增失敗", str(exc))
+            return
+
+        self.store.invalidate_folder_cache(parent_folder)
+        self.store.invalidate_folder_cache(new_path)
+        tree_state = self._capture_tree_state()
+        tree_state["selected_path"] = self._path_key(new_path)
+        self.refresh_tree(restore_state=tree_state)
+        self.set_status(f"已新增資料夾：{new_path}")
 
     def open_current_target_folder(self) -> None:
         entry = self._context_target
@@ -2059,6 +2353,194 @@ class PeopleFolderManagerApp:
         if cur is not None and self.current_view_mode == "media":
             self.render_subfolder_media(cur)
         self.set_status(f"已重新命名檔案：{path.name} → {new_path.name}")
+
+    @staticmethod
+    def _unique_temp_path_for_batch(original: Path) -> Path:
+        token = uuid.uuid4().hex[:8]
+        return original.with_name(f"{original.name}.tmp_batch_{token}")
+
+    def _ask_rename_title_and_start(
+        self, title_validator, *, title_hint: str = "命名規則（例如：ABC）"
+    ) -> Optional[tuple[str, int]]:
+        base = simpledialog.askstring("重新命名與添加序號", title_hint, parent=self.root)
+        if base is None:
+            return None
+        base = base.strip()
+        if not title_validator(base):
+            messagebox.showwarning("警告", "命名規則無效：不可為空，且不可包含 \\ / : * ? \" < > | 等字元。")
+            return None
+
+        start_raw = simpledialog.askstring("重新命名與添加序號", "起始序號（整數）", parent=self.root)
+        if start_raw is None:
+            return None
+        start_raw = start_raw.strip()
+        if not start_raw:
+            messagebox.showwarning("警告", "請輸入起始序號。")
+            return None
+        try:
+            start_no = int(start_raw)
+        except ValueError:
+            messagebox.showwarning("警告", "起始序號必須是整數。")
+            return None
+        if start_no < 0:
+            messagebox.showwarning("警告", "起始序號不可小於 0。")
+            return None
+        return base, start_no
+
+    def _build_numbered_plan_with_defer_prompt(
+        self,
+        old_paths: list[Path],
+        base: str,
+        start_no: int,
+        *,
+        is_folder: bool,
+    ) -> Optional[list[tuple[Path, Path]]]:
+        selected_set = {p.resolve() for p in old_paths}
+        selected_parent_map: dict[Path, set[Path]] = {}
+        for p in selected_set:
+            selected_parent_map.setdefault(p.parent, set()).add(p)
+        planned_targets: set[Path] = set()
+        planned_file_stems: dict[Path, set[str]] = {}
+        plan: list[tuple[Path, Path]] = []
+        counter = start_no
+        for old in old_paths:
+            old = old.resolve()
+            suffix = "" if is_folder else old.suffix
+            while True:
+                candidate = (old.parent / f"{base}_{counter}{suffix}").resolve()
+                occupied_by_other = candidate.exists() and candidate not in selected_set
+                occupied_in_plan = candidate in planned_targets
+                stem = candidate.stem
+                stem_conflict = False
+                if not is_folder:
+                    siblings = []
+                    try:
+                        siblings = list(old.parent.iterdir())
+                    except Exception:
+                        siblings = []
+                    selected_in_parent = selected_parent_map.get(old.parent, set())
+                    existing_same_stem_other = any(
+                        s.is_file() and s.stem == stem and s.resolve() not in selected_in_parent for s in siblings
+                    )
+                    planned_same_stem = stem in planned_file_stems.get(old.parent, set())
+                    stem_conflict = existing_same_stem_other or planned_same_stem
+                if not occupied_by_other and not occupied_in_plan:
+                    if not stem_conflict or (candidate == old and stem == old.stem):
+                        plan.append((old, candidate))
+                        planned_targets.add(candidate)
+                        if not is_folder:
+                            planned_file_stems.setdefault(old.parent, set()).add(stem)
+                        counter += 1
+                        break
+
+                if candidate == old:
+                    plan.append((old, candidate))
+                    planned_targets.add(candidate)
+                    if not is_folder:
+                        planned_file_stems.setdefault(old.parent, set()).add(stem)
+                    counter += 1
+                    break
+                counter += 1
+        return plan
+
+    def rename_and_number_selected(self) -> None:
+        if self.current_view_mode == "media":
+            selected = [m for m in self.current_media_items if self._item_key_for_media(m) in self.selected_media_paths]
+            if not selected and self._context_media_item is not None:
+                selected = [self._context_media_item]
+            if not selected:
+                messagebox.showinfo("提示", "請先在預覽區選取要重新命名的檔案。")
+                return
+            params = self._ask_rename_title_and_start(self._is_valid_file_stem)
+            if params is None:
+                return
+            base, start_no = params
+            old_paths = [Path(x.media_path).resolve() for x in selected]
+            for old in old_paths:
+                if not old.is_file():
+                    messagebox.showerror("錯誤", f"找不到檔案：\n{old}")
+                    return
+            plan = self._build_numbered_plan_with_defer_prompt(old_paths, base, start_no, is_folder=False)
+            if plan is None:
+                return
+            tmp_plan: list[tuple[Path, Path, Path]] = []
+            try:
+                for old, new in plan:
+                    if old == new:
+                        continue
+                    tmp = self._unique_temp_path_for_batch(old)
+                    old.rename(tmp)
+                    tmp_plan.append((tmp, old, new))
+                for tmp, _old, new in tmp_plan:
+                    tmp.rename(new)
+            except Exception as exc:
+                for tmp, old, _new in reversed(tmp_plan):
+                    try:
+                        if tmp.exists() and not old.exists():
+                            tmp.rename(old)
+                    except Exception:
+                        pass
+                messagebox.showerror("重新命名失敗", str(exc))
+                return
+            touched = {Path(x.media_path).resolve().parent for x in selected}
+            for p in touched:
+                self.store.invalidate_folder_cache(p)
+            cur = self.current_subfolder_entry
+            if cur is not None and self.current_view_mode == "media":
+                self.render_subfolder_media(cur)
+            self.set_status(f"已依排序重新命名 {len(selected)} 個檔案")
+            return
+
+        selected_entries = [e for e in self.current_entries if self._item_key_for_entry(e) in self.selected_entry_keys]
+        if not selected_entries and self._context_target is not None:
+            selected_entries = [self._context_target]
+        if not selected_entries:
+            messagebox.showinfo("提示", "請先在預覽區選取要重新命名的資料夾。")
+            return
+        params = self._ask_rename_title_and_start(self._is_valid_folder_basename)
+        if params is None:
+            return
+        base, start_no = params
+        old_paths = [Path(x.subfolder_path).resolve() for x in selected_entries]
+        for old in old_paths:
+            if not old.is_dir():
+                messagebox.showerror("錯誤", f"找不到資料夾：\n{old}")
+                return
+        plan = self._build_numbered_plan_with_defer_prompt(old_paths, base, start_no, is_folder=True)
+        if plan is None:
+            return
+        old_new_rel_pairs: list[tuple[str, str]] = []
+        tmp_plan: list[tuple[Path, Path, Path]] = []
+        try:
+            for old, new in plan:
+                if old == new:
+                    continue
+                try:
+                    old_rel = self.store.to_relative_key(old)
+                    new_rel = self.store.to_relative_key(new)
+                    old_new_rel_pairs.append((old_rel, new_rel))
+                except Exception:
+                    pass
+                tmp = self._unique_temp_path_for_batch(old)
+                old.rename(tmp)
+                tmp_plan.append((tmp, old, new))
+            for tmp, _old, new in tmp_plan:
+                tmp.rename(new)
+        except Exception as exc:
+            for tmp, old, _new in reversed(tmp_plan):
+                try:
+                    if tmp.exists() and not old.exists():
+                        tmp.rename(old)
+                except Exception:
+                    pass
+            messagebox.showerror("重新命名失敗", str(exc))
+            return
+        for old_rel, new_rel in old_new_rel_pairs:
+            if old_rel and new_rel:
+                self.tag_repo.rename_relative_path_root(old_rel, new_rel)
+        self.store.clear_cache()
+        self.refresh_tree(restore_state=self._capture_tree_state())
+        self.set_status(f"已依排序重新命名 {len(selected_entries)} 個資料夾")
 
     def transfer_current_target_folder(self) -> None:
         entry = self._context_target
