@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import sys
 import subprocess
@@ -18,7 +19,7 @@ from typing import Optional
 
 import customtkinter as ctk
 import tkinter as tk
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from app_paths import get_app_data_dir, get_config_path
@@ -35,10 +36,10 @@ APP_NAME = "PeopleFolderManager"
 ENTRY_THUMBNAIL_SIZE = (240, 170)
 MEDIA_THUMBNAIL_SIZE = (240, 200)
 ENTRY_CARD_SIZE = (280, 260)
-MEDIA_CARD_SIZE = (280, 290)
+MEDIA_CARD_SIZE = (280, 312)
 
-ENTRY_COLUMNS = 3
-MEDIA_COLUMNS = 4
+ENTRY_COLUMNS = 5
+MEDIA_COLUMNS = 5
 ENTRY_BATCH_FIRST = 6
 ENTRY_BATCH_SIZE = 12
 MEDIA_BATCH_FIRST = 8
@@ -235,7 +236,14 @@ class ThumbnailService:
             "default=noprint_wrappers=1:nokey=1",
             str(video_path),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
         if result.returncode != 0:
             return None
         try:
@@ -243,6 +251,50 @@ class ThumbnailService:
         except Exception:
             return None
         return value if value > 0 else None
+
+    def _probe_duration_via_ffmpeg_stderr(self, video_path: Path) -> Optional[float]:
+        if not self.ffmpeg_path:
+            return None
+        try:
+            result = subprocess.run(
+                [self.ffmpeg_path, "-hide_banner", "-i", str(video_path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=45,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return None
+        m = re.search(r"Duration:\s*(\d{1,2}):(\d{2}):(\d{2}\.\d+)", result.stderr or "")
+        if not m:
+            return None
+        try:
+            h = int(m.group(1))
+            mi = int(m.group(2))
+            sec = float(m.group(3))
+        except ValueError:
+            return None
+        total = h * 3600 + mi * 60 + sec
+        return total if total > 0 else None
+
+    def get_video_duration_seconds(self, video_path: Path) -> Optional[float]:
+        d = self._probe_duration_seconds(video_path)
+        if d is not None:
+            return d
+        return self._probe_duration_via_ffmpeg_stderr(video_path)
+
+    @staticmethod
+    def format_video_duration(seconds: float) -> str:
+        if seconds <= 0 or seconds != seconds:
+            return "—"
+        total = int(round(seconds))
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
 
     def _build_video_offsets(self, video_path: Path) -> list[str]:
         duration = self._probe_duration_seconds(video_path)
@@ -295,7 +347,7 @@ class PeopleFolderManagerApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("人物資料夾管理器")
-        self.root.geometry("1450x920")
+        self.root.geometry("1760x920")
 
         self.config_path = get_config_path(APP_NAME)
         self.config = self._load_config()
@@ -321,8 +373,17 @@ class PeopleFolderManagerApp:
         self.selected_filter_tags: set[str] = set()
         self.filter_media_video_var = ctk.BooleanVar(value=False)
         self.filter_media_image_var = ctk.BooleanVar(value=False)
+        self.filter_duration_min_var = ctk.StringVar(value="")
+        self.filter_duration_max_var = ctk.StringVar(value="")
+        self.filter_tags_expanded = True
         self._context_target: Optional[SubfolderEntry] = None
         self._context_media_item: Optional[MediaItem] = None
+        self._active_media_browser: Optional["MediaBrowserWindow"] = None
+        self.selected_entry_keys: set[str] = set()
+        self.selected_media_paths: set[str] = set()
+        self._entry_card_widgets: dict[str, ctk.CTkFrame] = {}
+        self._media_card_widgets: dict[str, ctk.CTkFrame] = {}
+        self._selection_anchor_index: Optional[int] = None
 
         self.load_session_id = 0
         self.active_session_id = 0
@@ -383,12 +444,27 @@ class PeopleFolderManagerApp:
         body = ctk.CTkFrame(self.root)
         body.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=3)
         body.grid_rowconfigure(0, weight=1)
 
-        left_frame = ctk.CTkFrame(body)
-        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=8)
-        ctk.CTkLabel(left_frame, text="導覽樹狀欄位", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(10, 6))
+        self.tree_paned = tk.PanedWindow(
+            body,
+            orient=tk.HORIZONTAL,
+            sashwidth=5,
+            sashrelief=tk.FLAT,
+            sashpad=2,
+            bg="#2b2b2b",
+            bd=0,
+        )
+        self.tree_paned.grid(row=0, column=0, sticky="nsew", padx=0, pady=8)
+
+        left_frame = ctk.CTkFrame(self.tree_paned, corner_radius=0)
+        right_frame = ctk.CTkFrame(self.tree_paned, corner_radius=0)
+        self.tree_paned.add(left_frame, minsize=200, stretch="never")
+        self.tree_paned.add(right_frame, minsize=520, stretch="always")
+
+        ctk.CTkLabel(left_frame, text="導覽樹狀欄位（拖曳中間分隔線調整寬度）", font=("Arial", 12, "bold")).pack(
+            anchor="w", padx=10, pady=(10, 6)
+        )
 
         tree_host = tk.Frame(left_frame, bg="#2b2b2b")
         tree_host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -399,7 +475,9 @@ class PeopleFolderManagerApp:
         self.folder_tree.grid(row=0, column=0, sticky="nsew")
         tree_vsb = ttk.Scrollbar(tree_host, orient="vertical", command=self.folder_tree.yview)
         tree_vsb.grid(row=0, column=1, sticky="ns")
-        self.folder_tree.configure(yscrollcommand=tree_vsb.set)
+        tree_hsb = ttk.Scrollbar(tree_host, orient="horizontal", command=self.folder_tree.xview)
+        tree_hsb.grid(row=1, column=0, sticky="ew", columnspan=2)
+        self.folder_tree.configure(yscrollcommand=tree_vsb.set, xscrollcommand=tree_hsb.set)
 
         style = ttk.Style()
         style.theme_use("default")
@@ -411,8 +489,8 @@ class PeopleFolderManagerApp:
         self.folder_tree.bind("<<TreeviewOpen>>", self.on_tree_open)
         self._bind_right_click_menu(self.folder_tree, self.on_tree_right_click)
 
-        right_frame = ctk.CTkFrame(body)
-        right_frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=8)
+        self.root.after_idle(self._set_initial_tree_pane_sash)
+
         right_frame.grid_rowconfigure(2, weight=1)
         right_frame.grid_columnconfigure(0, weight=1)
 
@@ -421,28 +499,57 @@ class PeopleFolderManagerApp:
 
         filter_frame = ctk.CTkFrame(right_frame)
         filter_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
-        ctk.CTkLabel(filter_frame, text="標籤篩選（勾選即套用 OR）", font=("Arial", 11, "bold")).pack(
-            anchor="w", padx=10, pady=(8, 4)
+        self.filter_tags_header_frame = ctk.CTkFrame(filter_frame, fg_color="transparent")
+        self.filter_tags_header_frame.pack(fill="x", padx=10, pady=(8, 4))
+        ctk.CTkLabel(
+            self.filter_tags_header_frame, text="標籤篩選（勾選即套用 OR）", font=("Arial", 11, "bold")
+        ).pack(side="left", padx=(0, 6))
+        self.filter_tags_toggle_btn = ctk.CTkButton(
+            self.filter_tags_header_frame,
+            text="▼ 收合標籤",
+            width=96,
+            height=26,
+            command=self.on_toggle_filter_tags,
         )
+        self.filter_tags_toggle_btn.pack(side="right", padx=(8, 0))
         self.filter_tags_container = ctk.CTkScrollableFrame(filter_frame, height=96)
-        self.filter_tags_container.pack(fill="x", padx=8, pady=(0, 6))
-        media_row = ctk.CTkFrame(filter_frame, fg_color="transparent")
-        media_row.pack(fill="x", padx=10, pady=(0, 8))
-        ctk.CTkLabel(media_row, text="媒體類型：", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 6))
+        self.filter_tags_container.pack(fill="x", padx=8, pady=(0, 6), after=self.filter_tags_header_frame)
+        self.media_row_filter_frame = ctk.CTkFrame(filter_frame, fg_color="transparent")
+        self.media_row_filter_frame.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(self.media_row_filter_frame, text="媒體類型：", font=("Arial", 11, "bold")).pack(
+            side="left", padx=(0, 6)
+        )
         ctk.CTkCheckBox(
-            media_row,
+            self.media_row_filter_frame,
             text="影片",
             variable=self.filter_media_video_var,
             command=self.on_media_type_filter_changed,
             width=70,
         ).pack(side="left", padx=(0, 10))
         ctk.CTkCheckBox(
-            media_row,
+            self.media_row_filter_frame,
             text="圖片",
             variable=self.filter_media_image_var,
             command=self.on_media_type_filter_changed,
             width=70,
-        ).pack(side="left")
+        ).pack(side="left", padx=(0, 14))
+        ctk.CTkLabel(self.media_row_filter_frame, text="影片長度（分）", font=("Arial", 11, "bold")).pack(
+            side="left", padx=(0, 4)
+        )
+        self.filter_duration_min_entry = ctk.CTkEntry(
+            self.media_row_filter_frame, textvariable=self.filter_duration_min_var, width=52
+        )
+        self.filter_duration_min_entry.pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(self.media_row_filter_frame, text="～", font=("Arial", 11)).pack(side="left", padx=(0, 4))
+        self.filter_duration_max_entry = ctk.CTkEntry(
+            self.media_row_filter_frame, textvariable=self.filter_duration_max_var, width=52
+        )
+        self.filter_duration_max_entry.pack(side="left", padx=(0, 6))
+        ctk.CTkButton(self.media_row_filter_frame, text="套用", width=56, command=self.on_apply_duration_filter).pack(
+            side="left", padx=(0, 4)
+        )
+        for w in (self.filter_duration_min_entry, self.filter_duration_max_entry):
+            w.bind("<Return>", self._on_duration_filter_return)
 
         self.thumbnail_scroll = ctk.CTkScrollableFrame(right_frame, label_text="子資料夾縮圖預覽")
         self.thumbnail_scroll.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -459,8 +566,20 @@ class PeopleFolderManagerApp:
         self.context_menu.add_command(label="重新命名資料夾", command=self.rename_current_target_folder)
         self.context_menu.add_command(label="重新命名檔案", command=self.rename_current_target_file)
         self.context_menu.add_command(label="轉移資料夾內容到…", command=self.transfer_current_target_folder)
+        self.context_menu.add_command(label="轉移已選取項目到…", command=self.transfer_selected_preview_items)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="刪除資料夾", command=self.delete_current_target_folder)
+
+    def _on_duration_filter_return(self, _event: tk.Event) -> str:
+        self.on_apply_duration_filter()
+        return "break"
+
+    def _set_initial_tree_pane_sash(self) -> None:
+        try:
+            self.root.update_idletasks()
+            self.tree_paned.sash_place(0, 280, 0)
+        except tk.TclError:
+            pass
 
     def _new_session(self) -> int:
         self.load_session_id += 1
@@ -663,9 +782,9 @@ class PeopleFolderManagerApp:
             return entries
         return [e for e in entries if self._tree_folder_visible_with_media_filter(e.subfolder_path)]
 
-    def _filter_media_items_for_preview(self, items: list[MediaItem]) -> list[MediaItem]:
-        want_v = self.filter_media_video_var.get()
-        want_i = self.filter_media_image_var.get()
+    def _filter_media_items_by_type_list(
+        self, items: list[MediaItem], want_v: bool, want_i: bool
+    ) -> list[MediaItem]:
         if not want_v and not want_i:
             return list(items)
         if want_v and want_i:
@@ -673,6 +792,90 @@ class PeopleFolderManagerApp:
         if want_v:
             return [m for m in items if m.media_type == "video"]
         return [m for m in items if m.media_type == "image"]
+
+    def _filter_media_items_for_preview(self, items: list[MediaItem]) -> list[MediaItem]:
+        return self._filter_media_items_by_type_list(
+            items,
+            self.filter_media_video_var.get(),
+            self.filter_media_image_var.get(),
+        )
+
+    def _parse_duration_filter_minutes(self) -> tuple[Optional[float], Optional[float]]:
+        """兩欄皆空白表示不套用影片長度篩選；僅填一側則另一側視為無上限／無下限。"""
+        s_lo = self.filter_duration_min_var.get().strip()
+        s_hi = self.filter_duration_max_var.get().strip()
+        if not s_lo and not s_hi:
+            return None, None
+        lo: Optional[float] = None
+        hi: Optional[float] = None
+        if s_lo:
+            try:
+                lo = float(s_lo)
+            except ValueError as exc:
+                raise ValueError("「最短」分鐘請填數字（可含小數）。") from exc
+            if lo < 0:
+                raise ValueError("「最短」分鐘不可為負數。")
+        if s_hi:
+            try:
+                hi = float(s_hi)
+            except ValueError as exc:
+                raise ValueError("「最長」分鐘請填數字（可含小數）。") from exc
+            if hi < 0:
+                raise ValueError("「最長」分鐘不可為負數。")
+        if lo is not None and hi is not None and lo > hi:
+            raise ValueError("最短分鐘不可大於最長分鐘。")
+        return lo, hi
+
+    def _filter_items_by_duration_minutes(
+        self, items: list[MediaItem], lo_min: Optional[float], hi_min: Optional[float]
+    ) -> list[MediaItem]:
+        if lo_min is None and hi_min is None:
+            return list(items)
+        lo_s = (lo_min * 60.0) if lo_min is not None else 0.0
+        hi_s = (hi_min * 60.0) if hi_min is not None else float("inf")
+        out: list[MediaItem] = []
+        for m in items:
+            if m.media_type == "image":
+                out.append(m)
+                continue
+            sec = self.thumbnail_service.get_video_duration_seconds(m.media_path)
+            if sec is None:
+                continue
+            if lo_s <= sec <= hi_s:
+                out.append(m)
+        return out
+
+    def _scan_media_for_preview_worker(
+        self,
+        folder: Path,
+        want_video: bool,
+        want_image: bool,
+        lo_min: Optional[float],
+        hi_min: Optional[float],
+    ) -> tuple[list[MediaItem], list[MediaItem]]:
+        raw = self.store.list_media_items(folder)
+        typed = self._filter_media_items_by_type_list(raw, want_video, want_image)
+        if lo_min is None and hi_min is None:
+            return raw, typed
+        return raw, self._filter_items_by_duration_minutes(typed, lo_min, hi_min)
+
+    def on_toggle_filter_tags(self) -> None:
+        self.filter_tags_expanded = not self.filter_tags_expanded
+        if self.filter_tags_expanded:
+            self.filter_tags_container.pack(fill="x", padx=8, pady=(0, 6), after=self.filter_tags_header_frame)
+            self.filter_tags_toggle_btn.configure(text="▼ 收合標籤")
+        else:
+            self.filter_tags_container.pack_forget()
+            self.filter_tags_toggle_btn.configure(text="▶ 展開標籤")
+
+    def on_apply_duration_filter(self) -> None:
+        try:
+            self._parse_duration_filter_minutes()
+        except ValueError as exc:
+            messagebox.showerror("影片長度篩選", str(exc))
+            return
+        if self.current_view_mode == "media" and self.current_subfolder_entry is not None:
+            self.render_subfolder_media(self.current_subfolder_entry)
 
     def _refresh_tree_and_reload_selection(self) -> None:
         tree_state = self._capture_tree_state()
@@ -1036,6 +1239,9 @@ class PeopleFolderManagerApp:
             row = idx // ENTRY_COLUMNS
             col = idx % ENTRY_COLUMNS
             card, image_label = self._create_entry_card(row, col, entry)
+            entry_key = self._item_key_for_entry(entry)
+            self._entry_card_widgets[entry_key] = card
+            self._bind_preview_card_selection(card, entry, idx, "entry")
             entry_menu = lambda e, x=entry: self.show_context_menu_for_entry(e, x)
             self._bind_right_click_menu(card, entry_menu)
             for child in card.winfo_children():
@@ -1065,8 +1271,12 @@ class PeopleFolderManagerApp:
             item = media_items[idx]
             row = idx // MEDIA_COLUMNS
             col = idx % MEDIA_COLUMNS
-            card, image_label = self._create_media_card(row, col, item)
+            card, image_label, duration_label = self._create_media_card(row, col, item)
+            media_key = self._item_key_for_media(item)
+            self._media_card_widgets[media_key] = card
+            self._bind_preview_card_selection(card, item, idx, "media")
             self._bind_media_card_context_menu(card, item)
+            self._bind_media_card_double_click_open(card, item)
             fut = self.thumb_executor.submit(
                 self.thumbnail_service.get_file_thumbnail, item.media_path, item.media_type, MEDIA_THUMBNAIL_SIZE
             )
@@ -1075,6 +1285,15 @@ class PeopleFolderManagerApp:
                     self._apply_thumbnail, session_id, lbl, f, MEDIA_THUMBNAIL_SIZE
                 )
             )
+            if duration_label is not None:
+                fut_dur = self.thumb_executor.submit(
+                    self.thumbnail_service.get_video_duration_seconds, item.media_path
+                )
+                fut_dur.add_done_callback(
+                    lambda f, session_id=sid, lbl=duration_label: self._enqueue_ui_task(
+                        self._apply_video_duration, session_id, lbl, f
+                    )
+                )
         st["next_index"] = end
         if end >= len(media_items):
             self.set_status(f"已顯示全部 {len(media_items)} 個媒體檔案")
@@ -1203,8 +1422,112 @@ class PeopleFolderManagerApp:
     def clear_thumbnail_cards(self) -> None:
         self._cancel_thumb_yview_debounce()
         self._thumb_paging_state = None
+        self.selected_entry_keys.clear()
+        self.selected_media_paths.clear()
+        self._entry_card_widgets.clear()
+        self._media_card_widgets.clear()
+        self._selection_anchor_index = None
         for child in self.thumbnail_scroll.winfo_children():
             child.destroy()
+
+    @staticmethod
+    def _is_macos_platform() -> bool:
+        return sys.platform == "darwin"
+
+    @staticmethod
+    def _item_key_for_entry(entry: SubfolderEntry) -> str:
+        return str(Path(entry.subfolder_path).resolve())
+
+    @staticmethod
+    def _item_key_for_media(item: MediaItem) -> str:
+        return str(Path(item.media_path).resolve())
+
+    def _apply_card_selected_style(self, card: ctk.CTkFrame, selected: bool) -> None:
+        try:
+            if selected:
+                card.configure(border_width=2, border_color="#3B8ED0")
+            else:
+                card.configure(border_width=0)
+        except Exception:
+            return
+
+    def _refresh_preview_selection_styles(self) -> None:
+        for key, card in self._entry_card_widgets.items():
+            self._apply_card_selected_style(card, key in self.selected_entry_keys)
+        for key, card in self._media_card_widgets.items():
+            self._apply_card_selected_style(card, key in self.selected_media_paths)
+
+    def _selection_keys_order(self) -> list[str]:
+        st = self._thumb_paging_state or {}
+        kind = st.get("kind")
+        if kind == "media":
+            return [self._item_key_for_media(x) for x in st.get("items", [])]
+        if kind == "entries":
+            return [self._item_key_for_entry(x) for x in st.get("entries", [])]
+        if self.current_view_mode == "media":
+            return [self._item_key_for_media(x) for x in self.current_media_items]
+        return [self._item_key_for_entry(x) for x in self.current_entries]
+
+    def _bind_preview_card_selection(self, card: ctk.CTkFrame, item, idx: int, kind: str) -> None:
+        def get_key() -> str:
+            if kind == "entry":
+                return self._item_key_for_entry(item)
+            return self._item_key_for_media(item)
+
+        def select_single(_event: tk.Event) -> None:
+            key = get_key()
+            if kind == "entry":
+                self.selected_entry_keys = {key}
+                self.selected_media_paths.clear()
+            else:
+                self.selected_media_paths = {key}
+                self.selected_entry_keys.clear()
+            self._selection_anchor_index = idx
+            self._refresh_preview_selection_styles()
+
+        def toggle_one(_event: tk.Event) -> str:
+            key = get_key()
+            if kind == "entry":
+                self.selected_media_paths.clear()
+                if key in self.selected_entry_keys:
+                    self.selected_entry_keys.remove(key)
+                else:
+                    self.selected_entry_keys.add(key)
+            else:
+                self.selected_entry_keys.clear()
+                if key in self.selected_media_paths:
+                    self.selected_media_paths.remove(key)
+                else:
+                    self.selected_media_paths.add(key)
+            self._selection_anchor_index = idx
+            self._refresh_preview_selection_styles()
+            return "break"
+
+        def select_range(_event: tk.Event) -> str:
+            anchor = self._selection_anchor_index if self._selection_anchor_index is not None else idx
+            lo, hi = sorted((anchor, idx))
+            keys = self._selection_keys_order()
+            picked = set(keys[lo : hi + 1])
+            if kind == "entry":
+                self.selected_entry_keys = picked
+                self.selected_media_paths.clear()
+            else:
+                self.selected_media_paths = picked
+                self.selected_entry_keys.clear()
+            self._refresh_preview_selection_styles()
+            return "break"
+
+        def bind_tree(w: tk.Misc) -> None:
+            w.bind("<Button-1>", select_single)
+            w.bind("<Shift-Button-1>", select_range)
+            if self._is_macos_platform():
+                w.bind("<Command-Button-1>", toggle_one)
+            else:
+                w.bind("<Control-Button-1>", toggle_one)
+            for ch in w.winfo_children():
+                bind_tree(ch)
+
+        bind_tree(card)
 
     def render_entries(self, entries: list[SubfolderEntry], *, reuse_session: Optional[int] = None) -> None:
         sid = reuse_session if reuse_session is not None else self._new_session()
@@ -1253,6 +1576,12 @@ class PeopleFolderManagerApp:
         return card, image_label
 
     def render_subfolder_media(self, entry: SubfolderEntry) -> None:
+        try:
+            d_lo, d_hi = self._parse_duration_filter_minutes()
+        except ValueError as exc:
+            messagebox.showerror("影片長度篩選", str(exc))
+            self.set_status(str(exc))
+            return
         sid = self._new_session()
         self.current_view_mode = "media"
         self.current_subfolder_entry = entry
@@ -1265,7 +1594,14 @@ class PeopleFolderManagerApp:
         self.set_status("正在掃描子資料夾媒體...")
 
         start = self._perf_start()
-        fut = self.scan_executor.submit(self.store.list_media_items, entry.subfolder_path)
+        fut = self.scan_executor.submit(
+            self._scan_media_for_preview_worker,
+            entry.subfolder_path,
+            self.filter_media_video_var.get(),
+            self.filter_media_image_var.get(),
+            d_lo,
+            d_hi,
+        )
         fut.add_done_callback(
             lambda f, session_id=sid, parent_entry=entry, s=start: self._enqueue_ui_task(
                 self._on_media_items_loaded, session_id, parent_entry, f, s
@@ -1285,11 +1621,10 @@ class PeopleFolderManagerApp:
             return
         self.clear_thumbnail_cards()
         try:
-            media_items = future.result()
+            media_items, display_items = future.result()
         except Exception as exc:
             messagebox.showerror("錯誤", f"載入媒體清單失敗：\n{exc}")
             return
-        display_items = self._filter_media_items_for_preview(media_items)
         self.current_media_items = display_items
         if not media_items:
             ctk.CTkLabel(self.thumbnail_scroll, text="此子資料夾內沒有圖片或影片").grid(
@@ -1298,7 +1633,7 @@ class PeopleFolderManagerApp:
             self.set_status("子資料夾內沒有可預覽媒體")
             return
         if not display_items:
-            ctk.CTkLabel(self.thumbnail_scroll, text="目前媒體類型篩選下沒有符合的項目").grid(
+            ctk.CTkLabel(self.thumbnail_scroll, text="目前篩選條件下沒有符合的媒體項目").grid(
                 row=0, column=0, padx=16, pady=16, sticky="w"
             )
             self.set_status("篩選後沒有可預覽媒體")
@@ -1319,6 +1654,7 @@ class PeopleFolderManagerApp:
         card.grid_rowconfigure(0, weight=0)
         card.grid_rowconfigure(1, weight=0)
         card.grid_rowconfigure(2, weight=0)
+        card.grid_rowconfigure(3, weight=0)
         card.grid_columnconfigure(0, weight=1)
 
         holder = self.thumbnail_service._build_placeholder("LOADING", MEDIA_THUMBNAIL_SIZE)
@@ -1330,9 +1666,13 @@ class PeopleFolderManagerApp:
         short_name = item.media_path.name if len(item.media_path.name) <= 28 else item.media_path.name[:28] + "..."
         ctk.CTkLabel(card, text=short_name, anchor="w").grid(row=1, column=0, padx=8, sticky="ew")
         ctk.CTkLabel(card, text=f"類型：{'圖片' if item.media_type == 'image' else '影片'}", anchor="w", height=20).grid(
-            row=2, column=0, padx=8, pady=(2, 8), sticky="ew"
+            row=2, column=0, padx=8, pady=(2, 4), sticky="ew"
         )
-        return card, image_label
+        duration_label = None
+        if item.media_type == "video":
+            duration_label = ctk.CTkLabel(card, text="長度：讀取中…", anchor="w", height=20)
+            duration_label.grid(row=3, column=0, padx=8, pady=(0, 8), sticky="ew")
+        return card, image_label, duration_label
 
     def _bind_media_card_context_menu(self, card: ctk.CTkFrame, item: MediaItem) -> None:
         def handler(event: tk.Event, m: MediaItem = item) -> None:
@@ -1341,6 +1681,48 @@ class PeopleFolderManagerApp:
         self._bind_right_click_menu(card, handler)
         for child in card.winfo_children():
             self._bind_right_click_menu(child, handler)
+
+    def _bind_media_card_double_click_open(self, card: ctk.CTkFrame, item: MediaItem) -> None:
+        def on_double(_event: tk.Event, m: MediaItem = item) -> None:
+            self.open_media_browser(m)
+
+        def bind_tree(w: tk.Misc) -> None:
+            w.bind("<Double-1>", on_double)
+            for ch in w.winfo_children():
+                bind_tree(ch)
+
+        bind_tree(card)
+
+    def _open_path_in_default_app(self, path: Path) -> None:
+        p = Path(path)
+        if not p.is_file():
+            messagebox.showerror("無法開啟", f"找不到檔案：\n{p}")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(p))
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(p)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(p)], check=False)
+        except Exception as exc:
+            messagebox.showerror("無法開啟", str(exc))
+
+    def open_media_browser(self, item: MediaItem) -> None:
+        if self.current_view_mode != "media" or not self.current_media_items:
+            messagebox.showinfo("提示", "請先進入子資料夾的媒體預覽，再雙擊檔案。")
+            return
+        items = list(self.current_media_items)
+        key = item.media_path.resolve()
+        try:
+            idx = next(i for i, m in enumerate(items) if m.media_path.resolve() == key)
+        except StopIteration:
+            messagebox.showinfo("提示", "此檔案不在目前預覽清單中（可能已篩選排除）。")
+            return
+        prev = self._active_media_browser
+        if prev is not None:
+            prev.close()
+        self._active_media_browser = MediaBrowserWindow(self, items, idx)
 
     def _apply_thumbnail(
         self, sid: int, image_label: ctk.CTkLabel, future, display_size: tuple[int, int]
@@ -1368,6 +1750,22 @@ class PeopleFolderManagerApp:
             self.session_first_thumb_logged[sid] = True
             if self.profile_enabled:
                 print(f"[PERF] first_thumbnail_ready(session={sid})")
+
+    def _apply_video_duration(self, sid: int, duration_label: ctk.CTkLabel, future) -> None:
+        if not self._is_active_session(sid):
+            return
+        try:
+            seconds = future.result()
+        except Exception:
+            seconds = None
+        if seconds is None or seconds <= 0:
+            text = "長度：無法取得"
+        else:
+            text = f"長度：{ThumbnailService.format_video_duration(seconds)}"
+        try:
+            duration_label.configure(text=text)
+        except tk.TclError:
+            return
 
     def refresh_filter_panel(self) -> None:
         known_tags = self.tag_repo.get_all_tags()
@@ -1446,6 +1844,7 @@ class PeopleFolderManagerApp:
             self.context_menu.entryconfig("重新命名資料夾", state="normal")
             self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
+            self.context_menu.entryconfig("轉移已選取項目到…", state="disabled")
             self.context_menu.entryconfig("刪除資料夾", state="normal")
         elif node_type == "person":
             person_folder = payload.get("path")
@@ -1464,6 +1863,7 @@ class PeopleFolderManagerApp:
             self.context_menu.entryconfig("重新命名資料夾", state="normal")
             self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
+            self.context_menu.entryconfig("轉移已選取項目到…", state="disabled")
             self.context_menu.entryconfig("刪除資料夾", state="normal")
         else:
             self._context_target = None
@@ -1471,6 +1871,11 @@ class PeopleFolderManagerApp:
         self.context_menu.post(event.x_root, event.y_root)
 
     def show_context_menu_for_entry(self, event, entry: SubfolderEntry) -> None:
+        entry_key = self._item_key_for_entry(entry)
+        if entry_key not in self.selected_entry_keys:
+            self.selected_entry_keys = {entry_key}
+            self.selected_media_paths.clear()
+            self._refresh_preview_selection_styles()
         self._context_target = entry
         self._context_media_item = None
         self.context_menu.entryconfig("添加標籤", state="normal")
@@ -1478,10 +1883,16 @@ class PeopleFolderManagerApp:
         self.context_menu.entryconfig("重新命名資料夾", state="normal")
         self.context_menu.entryconfig("重新命名檔案", state="disabled")
         self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
+        self.context_menu.entryconfig("轉移已選取項目到…", state="normal")
         self.context_menu.entryconfig("刪除資料夾", state="normal")
         self.context_menu.post(event.x_root, event.y_root)
 
     def show_context_menu_for_media(self, event, item: MediaItem) -> None:
+        media_key = self._item_key_for_media(item)
+        if media_key not in self.selected_media_paths:
+            self.selected_media_paths = {media_key}
+            self.selected_entry_keys.clear()
+            self._refresh_preview_selection_styles()
         self._context_target = self.current_subfolder_entry
         self._context_media_item = item
         self.context_menu.entryconfig("添加標籤", state="disabled")
@@ -1489,6 +1900,7 @@ class PeopleFolderManagerApp:
         self.context_menu.entryconfig("重新命名資料夾", state="disabled")
         self.context_menu.entryconfig("重新命名檔案", state="normal")
         self.context_menu.entryconfig("轉移資料夾內容到…", state="disabled")
+        self.context_menu.entryconfig("轉移已選取項目到…", state="normal")
         self.context_menu.entryconfig("刪除資料夾", state="disabled")
         self.context_menu.post(event.x_root, event.y_root)
 
@@ -1691,6 +2103,122 @@ class PeopleFolderManagerApp:
             )
         self.set_status(summary)
 
+    @staticmethod
+    def _build_non_conflict_file_path(folder: Path, base_name: str) -> Path:
+        candidate = folder / base_name
+        if not candidate.exists():
+            return candidate
+        stem = Path(base_name).stem
+        suffix = Path(base_name).suffix
+        index = 1
+        while True:
+            next_name = f"{stem}_moved_{index}{suffix}"
+            candidate = folder / next_name
+            if not candidate.exists():
+                return candidate
+            index += 1
+
+    def transfer_selected_preview_items(self) -> None:
+        if self.current_view_mode == "media":
+            selected = [m for m in self.current_media_items if self._item_key_for_media(m) in self.selected_media_paths]
+            if not selected and self._context_media_item is not None:
+                selected = [self._context_media_item]
+            if not selected:
+                messagebox.showinfo("提示", "請先在預覽區選取至少一個檔案。")
+                return
+            initial_dir = str(selected[0].media_path.parent)
+            target_selected = filedialog.askdirectory(title="選擇目標資料夾", initialdir=initial_dir)
+            if not target_selected:
+                return
+            target_folder = Path(target_selected).resolve()
+            if not target_folder.is_dir():
+                messagebox.showerror("錯誤", "目標資料夾不存在。")
+                return
+            if not messagebox.askyesno(
+                "確認批次轉移",
+                f"確定將 {len(selected)} 個檔案移動到「{target_folder.name}」？",
+            ):
+                return
+            moved_count = 0
+            renamed_count = 0
+            skipped_same_folder = 0
+            failed_count = 0
+            touched_parents: set[Path] = set()
+            for item in selected:
+                src = Path(item.media_path).resolve()
+                if not src.is_file():
+                    failed_count += 1
+                    continue
+                if src.parent == target_folder:
+                    skipped_same_folder += 1
+                    continue
+                dst = target_folder / src.name
+                if dst.exists():
+                    dst = self._build_non_conflict_file_path(target_folder, src.name)
+                    renamed_count += 1
+                try:
+                    shutil.move(str(src), str(dst))
+                    moved_count += 1
+                    touched_parents.add(src.parent)
+                except Exception:
+                    failed_count += 1
+            for parent in touched_parents:
+                self.store.invalidate_folder_cache(parent)
+            self.store.invalidate_folder_cache(target_folder)
+            cur = self.current_subfolder_entry
+            if cur is not None and self.current_view_mode == "media":
+                self.render_subfolder_media(cur)
+            self.set_status(
+                f"批次轉移完成：移動 {moved_count}，改名 {renamed_count}，略過 {skipped_same_folder}，失敗 {failed_count}"
+            )
+            return
+
+        selected_entries = [e for e in self.current_entries if self._item_key_for_entry(e) in self.selected_entry_keys]
+        if not selected_entries and self._context_target is not None:
+            selected_entries = [self._context_target]
+        if not selected_entries:
+            messagebox.showinfo("提示", "請先在預覽區選取至少一個資料夾。")
+            return
+        initial_dir = str(Path(selected_entries[0].subfolder_path).parent)
+        target_selected = filedialog.askdirectory(title="選擇目標資料夾", initialdir=initial_dir)
+        if not target_selected:
+            return
+        target_folder = Path(target_selected).resolve()
+        if not messagebox.askyesno(
+            "確認批次轉移",
+            f"確定將 {len(selected_entries)} 個資料夾的內容搬移到「{target_folder.name}」？\n"
+            "來源資料夾若無子資料夾，會在搬移後刪除。",
+        ):
+            return
+        moved_count = 0
+        renamed_count = 0
+        deleted_count = 0
+        failed_count = 0
+        for entry in selected_entries:
+            source_folder = Path(entry.subfolder_path).resolve()
+            try:
+                moved, renamed, source_deleted = self.store.move_folder_content_and_remove_source(source_folder, target_folder)
+                moved_count += moved
+                renamed_count += renamed
+                if source_deleted:
+                    deleted_count += 1
+            except Exception:
+                failed_count += 1
+                continue
+            if entry.relative_key:
+                source_tags = self.tag_repo.get_tags(entry.relative_key)
+                self.tag_repo.remove_key(entry.relative_key)
+                try:
+                    target_key = self.store.to_relative_key(target_folder)
+                except Exception:
+                    target_key = ""
+                if source_tags and target_key:
+                    self.tag_repo.set_tags(target_key, self.tag_repo.get_tags(target_key) + source_tags)
+        self.refresh_tree(restore_state=self._capture_tree_state())
+        self.set_status(
+            f"批次轉移完成：搬移 {moved_count}，改名 {renamed_count}，刪除來源 {deleted_count}，失敗 {failed_count}"
+        )
+
     def delete_current_target_folder(self) -> None:
         entry = self._context_target
         if not entry:
@@ -1788,6 +2316,215 @@ class PeopleFolderManagerApp:
 
     def run(self) -> None:
         self.root.mainloop()
+
+
+class MediaBrowserWindow:
+    """雙擊預覽後的大畫面瀏覽：圖片內嵌、←／→ 循環切換；影片顯示預覽格並可開啟系統播放器。"""
+
+    _LOAD_IMAGE_MAX = (8192, 8192)
+    _VIDEO_STILL_SIZE = (1920, 1080)
+
+    def __init__(self, app: PeopleFolderManagerApp, items: list[MediaItem], start_index: int) -> None:
+        self.app = app
+        self.items = list(items)
+        self.index = max(0, min(start_index, len(self.items) - 1)) if self.items else 0
+        self._load_gen = 0
+        self._resize_after: Optional[str] = None
+        self._source_rgb: Optional[Image.Image] = None
+        self._photo_image: Optional[ImageTk.PhotoImage] = None
+
+        self.top = ctk.CTkToplevel(app.root)
+        self.top.title("媒體瀏覽")
+        self.top.configure(fg_color="#0d0d0d")
+        self.top.protocol("WM_DELETE_WINDOW", self.close)
+        self.top.bind("<Escape>", lambda _e: self.close())
+        self.top.bind("<Left>", lambda _e: self._prev())
+        self.top.bind("<Right>", lambda _e: self._next())
+        self.top.bind("<Return>", lambda _e: self._open_external())
+        self.top.bind("<KP_Left>", lambda _e: self._prev())
+        self.top.bind("<KP_Right>", lambda _e: self._next())
+
+        toolbar = ctk.CTkFrame(self.top, fg_color="transparent")
+        toolbar.pack(fill="x", padx=12, pady=(10, 6))
+        self.title_label = ctk.CTkLabel(toolbar, text="", anchor="w", font=("Arial", 13, "bold"))
+        self.title_label.pack(side="left", fill="x", expand=True)
+
+        btn_fr = ctk.CTkFrame(toolbar, fg_color="transparent")
+        btn_fr.pack(side="right")
+        ctk.CTkButton(btn_fr, text="‹ 上一張", width=88, command=self._prev).pack(side="left", padx=4)
+        ctk.CTkButton(btn_fr, text="下一張 ›", width=88, command=self._next).pack(side="left", padx=4)
+        ctk.CTkButton(btn_fr, text="以程式開啟", width=100, command=self._open_external).pack(side="left", padx=4)
+        ctk.CTkButton(btn_fr, text="關閉", width=72, fg_color="#555555", hover_color="#666666", command=self.close).pack(
+            side="left", padx=(12, 0)
+        )
+
+        self.hint_label = ctk.CTkLabel(
+            self.top,
+            text="← → 循環切換同清單　Enter 以系統預設程式開啟目前檔案　Esc 關閉",
+            text_color="#888888",
+            font=("Arial", 11),
+        )
+        self.hint_label.pack(fill="x", padx=12, pady=(0, 6))
+
+        self.canvas = tk.Canvas(self.top, bg="#000000", highlightthickness=0, borderwidth=0)
+        self.canvas.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        self._try_maximize()
+        self._show_current()
+        self.top.after(50, self._grab_modal)
+
+    def _grab_modal(self) -> None:
+        try:
+            self.top.focus_force()
+            self.top.grab_set()
+        except tk.TclError:
+            pass
+
+    def _try_maximize(self) -> None:
+        self.top.update_idletasks()
+        try:
+            self.top.state("zoomed")
+        except tk.TclError:
+            try:
+                self.top.attributes("-zoomed", True)
+            except tk.TclError:
+                try:
+                    self.top.wm_state("zoomed")
+                except tk.TclError:
+                    pass
+
+    def close(self) -> None:
+        if self._resize_after is not None:
+            try:
+                self.top.after_cancel(self._resize_after)
+            except Exception:
+                pass
+            self._resize_after = None
+        try:
+            self.top.grab_release()
+        except Exception:
+            pass
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+        if getattr(self.app, "_active_media_browser", None) is self:
+            self.app._active_media_browser = None
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        if event.widget != self.canvas:
+            return
+        if self._resize_after is not None:
+            try:
+                self.top.after_cancel(self._resize_after)
+            except Exception:
+                pass
+        self._resize_after = self.top.after(120, self._render_canvas_from_source)
+
+    @staticmethod
+    def _scale_pil_to_fit(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
+        iw, ih = img.size
+        if iw <= 0 or ih <= 0:
+            return img
+        scale = min(max_w / iw, max_h / ih, 1.0)
+        nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+        if nw == iw and nh == ih:
+            return img
+        return img.resize((nw, nh), Image.Resampling.LANCZOS)
+
+    def _render_canvas_from_source(self) -> None:
+        self._resize_after = None
+        if self._source_rgb is None:
+            return
+        try:
+            if not self.top.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self.canvas.update_idletasks()
+        cw = max(200, self.canvas.winfo_width())
+        ch = max(200, self.canvas.winfo_height())
+        scaled = self._scale_pil_to_fit(self._source_rgb, cw, ch)
+        try:
+            self._photo_image = ImageTk.PhotoImage(scaled, master=self.canvas)
+        except Exception:
+            return
+        self.canvas.delete("all")
+        self.canvas.create_image(cw // 2, ch // 2, image=self._photo_image, anchor="center")
+
+    def _prev(self) -> None:
+        if len(self.items) <= 1:
+            return
+        self.index = (self.index - 1) % len(self.items)
+        self._show_current()
+
+    def _next(self) -> None:
+        if len(self.items) <= 1:
+            return
+        self.index = (self.index + 1) % len(self.items)
+        self._show_current()
+
+    def _open_external(self) -> None:
+        if not self.items:
+            return
+        self.app._open_path_in_default_app(self.items[self.index].media_path)
+
+    def _show_current(self) -> None:
+        if not self.items:
+            return
+        item = self.items[self.index]
+        self.top.title(f"媒體瀏覽 — {item.media_path.name}")
+        n = len(self.items)
+        kind = "圖片" if item.media_type == "image" else "影片"
+        self.title_label.configure(text=f"{item.media_path.name}　（{self.index + 1} / {n}）　{kind}")
+        self._load_gen += 1
+        gen = self._load_gen
+        self._source_rgb = None
+        self.canvas.delete("all")
+        cw = max(400, self.canvas.winfo_width())
+        ch = max(300, self.canvas.winfo_height())
+        self.canvas.create_text(
+            cw // 2,
+            ch // 2,
+            text="載入中…",
+            fill="#cccccc",
+            font=("Arial", 16),
+        )
+
+        fut = self.app.thumb_executor.submit(self._load_item_pil_worker, item, self.app.thumbnail_service)
+        fut.add_done_callback(
+            lambda f, g=gen: self.app._enqueue_ui_task(self._apply_loaded_pil, g, f)
+        )
+
+    @staticmethod
+    def _load_item_pil_worker(item: MediaItem, thumbnail_service: ThumbnailService) -> Image.Image:
+        if item.media_type == "image":
+            try:
+                with Image.open(item.media_path) as im:
+                    rgb = im.convert("RGB")
+                    rgb.thumbnail(MediaBrowserWindow._LOAD_IMAGE_MAX, Image.Resampling.LANCZOS)
+                    return rgb.copy()
+            except Exception:
+                return thumbnail_service._build_placeholder("讀取失敗", (640, 480))
+        return thumbnail_service.get_file_thumbnail(
+            item.media_path, "video", MediaBrowserWindow._VIDEO_STILL_SIZE
+        )
+
+    def _apply_loaded_pil(self, gen: int, future) -> None:
+        if gen != self._load_gen:
+            return
+        try:
+            if not self.top.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            pil = future.result()
+        except Exception:
+            pil = self.app.thumbnail_service._build_placeholder("讀取失敗", (640, 480))
+        self._source_rgb = pil
+        self._render_canvas_from_source()
 
 
 def main() -> None:
