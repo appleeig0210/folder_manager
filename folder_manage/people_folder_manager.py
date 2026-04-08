@@ -400,6 +400,12 @@ class PeopleFolderManagerApp:
         self._pending_selected_item: Optional[str] = None
         self._ui_task_queue: queue.Queue = queue.Queue()
         self._ui_pump_pending = False
+        self._tree_drag_source: Optional[str] = None
+        self._tree_host: Optional[tk.Frame] = None
+        self._tree_drag_start_xy: Optional[tuple[int, int]] = None
+        self._tree_drop_line: Optional[tk.Frame] = None
+        self._tree_drop_child_frame: Optional[tk.Frame] = None
+        self._tree_drag_visual_active = False
 
         self._build_layout()
         self._apply_saved_root()
@@ -408,7 +414,7 @@ class PeopleFolderManagerApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _load_config(self) -> dict:
-        default = {"root_folder": ""}
+        default = {"root_folder": "", "tree_child_order": {}}
         if self.config_path.exists():
             try:
                 payload = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -476,6 +482,7 @@ class PeopleFolderManagerApp:
         tree_host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         tree_host.grid_rowconfigure(0, weight=1)
         tree_host.grid_columnconfigure(0, weight=1)
+        self._tree_host = tree_host
 
         self.folder_tree = ttk.Treeview(tree_host, show="tree", selectmode="browse")
         self.folder_tree.grid(row=0, column=0, sticky="nsew")
@@ -493,6 +500,9 @@ class PeopleFolderManagerApp:
 
         self.folder_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.folder_tree.bind("<<TreeviewOpen>>", self.on_tree_open)
+        self.folder_tree.bind("<ButtonPress-1>", self._on_tree_drag_press, add=True)
+        self.folder_tree.bind("<B1-Motion>", self._on_tree_drag_motion, add=True)
+        self.root.bind("<ButtonRelease-1>", self._on_root_button1_release_tree_drag, add=True)
         self._bind_right_click_menu(self.folder_tree, self.on_tree_right_click)
 
         self.root.after_idle(self._set_initial_tree_pane_sash)
@@ -580,8 +590,10 @@ class PeopleFolderManagerApp:
         self.context_menu.add_command(label="重新命名檔案", command=self.rename_current_target_file)
         self.context_menu.add_command(label="轉移資料夾內容到…", command=self.transfer_current_target_folder)
         self.context_menu.add_command(label="轉移已選取項目到…", command=self.transfer_selected_preview_items)
+        self.context_menu.add_command(label="轉移並建立新資料夾…", command=self.transfer_selected_to_new_folder)
         self.context_menu.add_command(label="重新命名與添加序號…", command=self.rename_and_number_selected)
         self.context_menu.add_separator()
+        self.context_menu.add_command(label="刪除選取的檔案或資料夾…", command=self.delete_selected_preview_items)
         self.context_menu.add_command(label="刪除資料夾", command=self.delete_current_target_folder)
 
     def _on_duration_filter_return(self, _event: tk.Event) -> str:
@@ -635,7 +647,7 @@ class PeopleFolderManagerApp:
             self._begin_load_merged_entries()
             self._update_back_buttons_state()
             return
-        children = self.store.get_subfolder_entries_shallow(parent)
+        children = self._order_entries_by_saved_tree(parent, self.store.get_subfolder_entries_shallow(parent))
         self.current_scope_path = parent
         self.current_scope_label = parent.name
         self.render_entries(children)
@@ -644,9 +656,9 @@ class PeopleFolderManagerApp:
     def _open_entry_from_preview(self, entry: SubfolderEntry) -> None:
         folder = Path(entry.subfolder_path).resolve()
         self._try_sync_tree_selection(folder)
-        children = self.store.get_subfolders(folder)
+        children = self._get_ordered_subfolders(folder)
         if children:
-            entries = self.store.get_subfolder_entries_shallow(folder)
+            entries = self._order_entries_by_saved_tree(folder, self.store.get_subfolder_entries_shallow(folder))
             self.current_scope_path = folder
             self.current_scope_label = folder.name
             self.render_entries(entries)
@@ -773,7 +785,7 @@ class PeopleFolderManagerApp:
         if self.selected_filter_tags:
             self._build_tag_filtered_tree(root_node)
         else:
-            for person_folder in self.store.get_people_folders():
+            for person_folder in self._get_ordered_people_folders():
                 if not self._tree_folder_visible_with_media_filter(person_folder):
                     continue
                 person_node = self.folder_tree.insert(root_node, "end", text=person_folder.name, open=False)
@@ -793,12 +805,12 @@ class PeopleFolderManagerApp:
         self._perf_log(
             "refresh_tree",
             start,
-            extra=f"people={len(self.store.get_people_folders()) if self.store.root_folder else 0}",
+            extra=f"people={len(self._get_ordered_people_folders()) if self.store.root_folder else 0}",
         )
 
     def _populate_person_tree_shallow(self, person_node: str, person_folder: Path) -> None:
         """僅列出第一層子資料夾名稱，不掃描媒體（延遲到選取人物／根節點時再掃描）。"""
-        for subfolder in self.store.get_subfolders(person_folder):
+        for subfolder in self._get_ordered_subfolders(person_folder):
             if not self._tree_folder_visible_with_media_filter(subfolder):
                 continue
             child = self.folder_tree.insert(person_node, "end", text=subfolder.name, open=False)
@@ -1012,7 +1024,7 @@ class PeopleFolderManagerApp:
         return visible, entries
 
     def _build_tag_filtered_tree(self, root_node: str) -> None:
-        for person_folder in self.store.get_people_folders():
+        for person_folder in self._get_ordered_people_folders():
             if not self._tree_folder_visible_with_media_filter(person_folder):
                 continue
             visible, matching_entries = self._collect_tag_filter_state_for_person(person_folder, person_folder.name)
@@ -1094,7 +1106,7 @@ class PeopleFolderManagerApp:
 
         parent_path = Path(payload["path"])
         person_name = payload["person_name"]
-        subfolders = self.store.get_subfolders(parent_path)
+        subfolders = self._get_ordered_subfolders(parent_path)
         for subfolder in subfolders:
             if not self._tree_folder_visible_with_media_filter(subfolder):
                 continue
@@ -1174,6 +1186,912 @@ class PeopleFolderManagerApp:
         y_pos = state.get("y_pos")
         if isinstance(y_pos, (int, float)):
             self.root.after(0, lambda: self.folder_tree.yview_moveto(float(y_pos)))
+
+    def _ensure_tree_child_order_dict(self) -> dict:
+        raw = self.config.get("tree_child_order")
+        if not isinstance(raw, dict):
+            raw = {}
+            self.config["tree_child_order"] = raw
+        return raw
+
+    def _apply_saved_child_order(self, parent_path: Path, children: list[Path]) -> list[Path]:
+        if not children:
+            return []
+        order_map = self._ensure_tree_child_order_dict()
+        key = self._path_key(parent_path)
+        preferred = order_map.get(key)
+        if not preferred or not isinstance(preferred, list):
+            return sorted(children, key=lambda p: p.name.lower())
+        name_to_path = {p.name: p for p in children}
+        ordered: list[Path] = []
+        seen: set[str] = set()
+        for name in preferred:
+            if not isinstance(name, str):
+                continue
+            p = name_to_path.get(name)
+            if p is not None and name not in seen:
+                ordered.append(p)
+                seen.add(name)
+        for p in sorted(children, key=lambda x: x.name.lower()):
+            if p.name not in seen:
+                ordered.append(p)
+        return ordered
+
+    def _get_ordered_people_folders(self) -> list[Path]:
+        root = self.store.ensure_root_folder()
+        raw = [p for p in root.iterdir() if p.is_dir()]
+        return self._apply_saved_child_order(root, raw)
+
+    def _get_ordered_subfolders(self, folder: Path) -> list[Path]:
+        parent = Path(folder)
+        raw = [p for p in parent.iterdir() if p.is_dir()]
+        return self._apply_saved_child_order(parent, raw)
+
+    def _order_entries_by_saved_tree(self, parent_path: Path, entries: list[SubfolderEntry]) -> list[SubfolderEntry]:
+        if not entries:
+            return []
+        paths = [Path(e.subfolder_path) for e in entries]
+        ordered_paths = self._apply_saved_child_order(Path(parent_path), paths)
+        by_res = {Path(e.subfolder_path).resolve(): e for e in entries}
+        out: list[SubfolderEntry] = []
+        for p in ordered_paths:
+            e = by_res.get(Path(p).resolve())
+            if e is not None:
+                out.append(e)
+        return out
+
+    def _persist_child_order_from_tree_parent(self, parent_node_id: str) -> None:
+        meta = self.tree_metadata.get(parent_node_id) or {}
+        path_obj = meta.get("path")
+        if path_obj is None:
+            return
+        names: list[str] = []
+        for cid in self.folder_tree.get_children(parent_node_id):
+            cm = self.tree_metadata.get(cid) or {}
+            if cm.get("type") not in {"person", "subfolder"}:
+                continue
+            cp = cm.get("path")
+            if cp is not None:
+                names.append(Path(cp).name)
+        key = self._path_key(Path(path_obj))
+        self._ensure_tree_child_order_dict()[key] = names
+        self._save_config()
+
+    def _remove_name_from_tree_order(self, parent_path: Path, name: str) -> None:
+        key = self._path_key(parent_path)
+        order_map = self._ensure_tree_child_order_dict()
+        cur = order_map.get(key)
+        if not isinstance(cur, list) or name not in cur:
+            return
+        order_map[key] = [x for x in cur if x != name]
+        self._save_config()
+
+    def _append_name_to_tree_order(self, parent_path: Path, name: str) -> None:
+        key = self._path_key(parent_path)
+        order_map = self._ensure_tree_child_order_dict()
+        cur = list(order_map.get(key)) if isinstance(order_map.get(key), list) else []
+        cur = [x for x in cur if x != name]
+        cur.append(name)
+        order_map[key] = cur
+        self._save_config()
+
+    def _prepend_name_to_tree_order(self, parent_path: Path, name: str) -> None:
+        key = self._path_key(parent_path)
+        order_map = self._ensure_tree_child_order_dict()
+        cur = list(order_map.get(key)) if isinstance(order_map.get(key), list) else []
+        cur = [x for x in cur if x != name]
+        cur.insert(0, name)
+        order_map[key] = cur
+        self._save_config()
+
+    def _tree_state_expand_to_folder(self, folder: Path, base: Optional[dict] = None) -> dict:
+        state = dict(base) if base is not None else {}
+        ex = list(state.get("expanded_paths") or [])
+        ex_set = set(ex)
+        folder_r = Path(folder).resolve()
+        root_r = Path(self.store.root_folder).resolve() if self.store.root_folder else None
+        if root_r is not None:
+            cur = folder_r.parent
+            for _ in range(512):
+                try:
+                    cur.resolve().relative_to(root_r)
+                except ValueError:
+                    break
+                k = self._path_key(cur)
+                if k not in ex_set:
+                    ex.append(k)
+                    ex_set.add(k)
+                if cur == root_r:
+                    break
+                nxt = cur.parent
+                if nxt == cur:
+                    break
+                cur = nxt
+        state["expanded_paths"] = sorted(ex, key=lambda p: p.count("\\") + p.count("/"))
+        state["selected_path"] = self._path_key(folder_r)
+        return state
+
+    def _refresh_tree_after_new_folder_transfer(self, parent_path: Path, new_folder: Path) -> None:
+        self.store.invalidate_folder_cache(parent_path)
+        self.store.invalidate_folder_cache(new_folder)
+        self._prepend_name_to_tree_order(parent_path, new_folder.name)
+        snap = self._capture_tree_state()
+        self.refresh_tree(restore_state=self._tree_state_expand_to_folder(new_folder.resolve(), snap))
+
+    def _tree_order_after_delete_folder(self, deleted_folder: Path) -> None:
+        parent = deleted_folder.parent
+        self._remove_name_from_tree_order(parent, deleted_folder.name)
+        order_map = self._ensure_tree_child_order_dict()
+        dk = self._path_key(deleted_folder)
+        if dk in order_map:
+            del order_map[dk]
+        self._save_config()
+
+    def _prune_tree_state_after_deleted_paths(self, state: dict, deleted: list[Path]) -> dict:
+        if not deleted:
+            return state
+        roots = [Path(d).resolve() for d in deleted]
+
+        def touched_by_delete(p: Path) -> bool:
+            pr = p.resolve()
+            for r in roots:
+                try:
+                    pr.relative_to(r)
+                    return True
+                except ValueError:
+                    if pr == r:
+                        return True
+            return False
+
+        out = dict(state)
+        ex_new: list[str] = []
+        for x in out.get("expanded_paths") or []:
+            if not isinstance(x, str):
+                continue
+            try:
+                px = Path(x).resolve()
+            except Exception:
+                continue
+            if not touched_by_delete(px):
+                ex_new.append(self._path_key(px))
+        out["expanded_paths"] = ex_new
+
+        sp = out.get("selected_path")
+        if isinstance(sp, str):
+            try:
+                ps = Path(sp).resolve()
+                if touched_by_delete(ps):
+                    fallback = roots[0].parent.resolve()
+                    if self.store.root_folder:
+                        root_r = Path(self.store.root_folder).resolve()
+                        try:
+                            fallback.relative_to(root_r)
+                        except ValueError:
+                            fallback = root_r
+                    out["selected_path"] = self._path_key(fallback)
+            except Exception:
+                pass
+        return out
+
+    def _rewrite_tree_order_after_rename(self, old_path: Path, new_path: Path) -> None:
+        order_map = self._ensure_tree_child_order_dict()
+        try:
+            old_r = Path(old_path).resolve()
+            new_r = Path(new_path).resolve()
+        except Exception:
+            self._save_config()
+            return
+        old_pk = self._path_key(old_r)
+        new_pk = self._path_key(new_r)
+        if old_pk in order_map:
+            order_map[new_pk] = order_map.pop(old_pk)
+        parent_key = self._path_key(old_r.parent)
+        lst = order_map.get(parent_key)
+        if isinstance(lst, list) and old_r.name in lst:
+            order_map[parent_key] = [new_r.name if x == old_r.name else x for x in lst]
+        for k in list(order_map.keys()):
+            try:
+                kp = Path(k).resolve()
+                rel = kp.relative_to(old_r)
+            except (ValueError, OSError):
+                continue
+            nk = self._path_key(new_r / rel)
+            if nk != k:
+                order_map[nk] = order_map.pop(k)
+        self._save_config()
+
+    def _hide_tree_drop_visual(self) -> None:
+        if self._tree_drop_line is not None:
+            try:
+                self._tree_drop_line.place_forget()
+            except tk.TclError:
+                pass
+        if self._tree_drop_child_frame is not None:
+            try:
+                self._tree_drop_child_frame.place_forget()
+            except tk.TclError:
+                pass
+
+    def _ensure_tree_drop_line(self) -> tk.Frame:
+        if self._tree_host is None:
+            raise RuntimeError("tree host missing")
+        if self._tree_drop_line is None or not self._tree_drop_line.winfo_exists():
+            self._tree_drop_line = tk.Frame(self._tree_host, bg="#2ea3ff", height=3, bd=0, highlightthickness=0)
+        return self._tree_drop_line
+
+    def _ensure_tree_drop_child_frame(self) -> tk.Frame:
+        if self._tree_host is None:
+            raise RuntimeError("tree host missing")
+        if self._tree_drop_child_frame is None or not self._tree_drop_child_frame.winfo_exists():
+            self._tree_drop_child_frame = tk.Frame(self._tree_host, bg="#144870", bd=0, highlightthickness=0)
+        else:
+            try:
+                self._tree_drop_child_frame.configure(bg="#144870")
+            except tk.TclError:
+                pass
+        return self._tree_drop_child_frame
+
+    def _show_tree_drop_insert_line(self, item_id: str, before: bool) -> None:
+        if self._tree_host is None:
+            return
+        bbox = self.folder_tree.bbox(item_id)
+        if not bbox:
+            self._hide_tree_drop_visual()
+            return
+        _bx, by, _bw, bh = bbox
+        y_line = max(0, by - 2) if before else by + bh + 1
+        self.folder_tree.update_idletasks()
+        ox = self.folder_tree.winfo_x()
+        oy = self.folder_tree.winfo_y()
+        w = max(self.folder_tree.winfo_width(), 4)
+        if self._tree_drop_child_frame is not None:
+            try:
+                self._tree_drop_child_frame.place_forget()
+            except tk.TclError:
+                pass
+        line = self._ensure_tree_drop_line()
+        line.place(in_=self._tree_host, x=ox, y=oy + y_line, width=w, height=3)
+
+    def _show_tree_drop_as_child_highlight(self, item_id: str) -> None:
+        if self._tree_host is None:
+            return
+        bbox = self.folder_tree.bbox(item_id)
+        if not bbox:
+            self._hide_tree_drop_visual()
+            return
+        bx, by, bw, bh = bbox
+        self.folder_tree.update_idletasks()
+        ox = self.folder_tree.winfo_x()
+        oy = self.folder_tree.winfo_y()
+        left = ox + max(bx - 2, 0)
+        w = max(self.folder_tree.winfo_width() - (left - ox), 24)
+        if self._tree_drop_line is not None:
+            try:
+                self._tree_drop_line.place_forget()
+            except tk.TclError:
+                pass
+        panel = self._ensure_tree_drop_child_frame()
+        panel.place(in_=self._tree_host, x=left, y=oy + by, width=w, height=max(bh, 18))
+
+    def _tree_same_parent_vertical_zone(self, y_local: float, row: str) -> str:
+        """同層拖曳時依游標判定：列前插入 before、移入列內 into、列後插入 after。"""
+        bbox = self.folder_tree.bbox(row)
+        if not bbox:
+            return "after"
+        _bx, by, _bw, bh = bbox
+        if bh <= 0:
+            return "after"
+        rel_y = (float(y_local) - float(by)) / float(bh)
+        if rel_y < 0.28:
+            return "before"
+        if rel_y > 0.72:
+            return "after"
+        return "into"
+
+    def _try_tree_reparent_folder_drop(self, src: str, dst_row: str) -> bool:
+        """將樹節點 src 對應的資料夾移入 dst_row 底下；成功回傳 True。"""
+        src_meta = self.tree_metadata.get(src) or {}
+        dst_meta = self.tree_metadata.get(dst_row) or {}
+        if src_meta.get("type") not in {"person", "subfolder"}:
+            return False
+        if dst_meta.get("type") not in {"person", "subfolder"}:
+            return False
+        src_path = Path(src_meta["path"]).resolve()
+        dst_path = Path(dst_meta["path"]).resolve()
+        if not src_path.is_dir() or not dst_path.is_dir():
+            return False
+        if self.store.root_folder is None:
+            return False
+        root_r = Path(self.store.root_folder).resolve()
+        try:
+            src_path.relative_to(root_r)
+        except ValueError:
+            messagebox.showerror("錯誤", "只能搬移主資料夾底下的項目。")
+            return False
+        try:
+            if dst_path.resolve() == src_path.resolve() or dst_path.resolve().is_relative_to(src_path.resolve()):
+                messagebox.showerror("錯誤", "目標不可位於被拖曳的資料夾內部。")
+                return False
+        except (ValueError, OSError):
+            messagebox.showerror("錯誤", "無法驗證搬移路徑。")
+            return False
+
+        dest_dir = self._build_non_conflict_dest_dir(dst_path, src_path.name)
+        if not messagebox.askyesno(
+            "確認搬移資料夾",
+            f"確定將「{src_path.name}」移動到「{dst_path.name}」底下？\n"
+            f"新位置：{dest_dir}\n\n（標籤鍵將盡力同步；實體檔案會一併搬移）",
+        ):
+            return False
+
+        old_parent = src_path.parent
+        try:
+            shutil.move(str(src_path), str(dest_dir))
+        except OSError as exc:
+            messagebox.showerror("搬移失敗", str(exc))
+            return False
+
+        self._migrate_tags_after_folder_move(src_path, dest_dir)
+        self.store.clear_cache()
+        self._remove_name_from_tree_order(old_parent, src_path.name)
+        self._append_name_to_tree_order(dst_path, dest_dir.name)
+
+        tree_state = self._capture_tree_state()
+        old_r = src_path.resolve()
+        new_r = dest_dir.resolve()
+        new_sel = self._path_key(new_r)
+
+        def _rewrite_moved_path_str(ps: str) -> str:
+            try:
+                pr = Path(ps).resolve()
+            except Exception:
+                return ps
+            if pr == old_r:
+                return new_sel
+            try:
+                rel = pr.relative_to(old_r)
+                return self._path_key(new_r / rel)
+            except ValueError:
+                return ps
+
+        sp = tree_state.get("selected_path")
+        if isinstance(sp, str):
+            tree_state["selected_path"] = _rewrite_moved_path_str(sp)
+        ex_in = tree_state.get("expanded_paths") or []
+        tree_state["expanded_paths"] = [_rewrite_moved_path_str(x) for x in ex_in if isinstance(x, str)]
+
+        self.refresh_tree(restore_state=tree_state)
+        self.set_status(f"已搬移資料夾至：{dest_dir}")
+        return True
+
+    def _on_tree_drag_press(self, event: tk.Event) -> None:
+        self._tree_drag_source = None
+        self._tree_drag_start_xy = None
+        if self.selected_filter_tags:
+            return
+        row = self.folder_tree.identify_row(event.y)
+        if not row:
+            return
+        meta = self.tree_metadata.get(row) or {}
+        if meta.get("type") in (None, "stub", "root"):
+            return
+        self._tree_drag_source = row
+        self._tree_drag_start_xy = (event.x, event.y)
+
+    def _on_tree_drag_motion(self, event: tk.Event) -> None:
+        src = self._tree_drag_source
+        if not src or self.selected_filter_tags:
+            return
+        if self._tree_drag_start_xy is None:
+            return
+        dx = abs(event.x - self._tree_drag_start_xy[0])
+        dy = abs(event.y - self._tree_drag_start_xy[1])
+        if dx + dy < 9:
+            self._hide_tree_drop_visual()
+            return
+        self._tree_drag_visual_active = True
+        self._show_drag_hint("上／下緣：調整順序；列中間：移入該資料夾", event.x_root, event.y_root)
+        self._move_drag_hint(event.x_root, event.y_root)
+
+        row = self.folder_tree.identify_row(event.y)
+        if not row or row == src:
+            self._hide_tree_drop_visual()
+            return
+        dst_meta = self.tree_metadata.get(row) or {}
+        if dst_meta.get("type") == "stub":
+            self._hide_tree_drop_visual()
+            return
+
+        parent_src = self.folder_tree.parent(src)
+        parent_dst = self.folder_tree.parent(row)
+        if parent_src == parent_dst:
+            siblings = list(self.folder_tree.get_children(parent_src))
+            if src not in siblings or row not in siblings:
+                self._hide_tree_drop_visual()
+                return
+            zone = self._tree_same_parent_vertical_zone(float(event.y), row)
+            dm = self.tree_metadata.get(row) or {}
+            if zone == "into" and dm.get("type") in {"person", "subfolder"}:
+                self._show_tree_drop_as_child_highlight(row)
+                return
+            if zone == "before":
+                self._show_tree_drop_insert_line(row, True)
+                return
+            if zone == "after":
+                self._show_tree_drop_insert_line(row, False)
+                return
+            self._hide_tree_drop_visual()
+            return
+
+        if dst_meta.get("type") == "root":
+            self._hide_tree_drop_visual()
+            return
+        if dst_meta.get("type") not in {"person", "subfolder"}:
+            self._hide_tree_drop_visual()
+            return
+        self._show_tree_drop_as_child_highlight(row)
+
+    def _on_root_button1_release_tree_drag(self, event: tk.Event) -> None:
+        tree_dragging = self._tree_drag_source is not None or self._tree_drag_visual_active
+        self._hide_tree_drop_visual()
+        if tree_dragging:
+            self._hide_drag_hint()
+        self._tree_drag_visual_active = False
+        src = self._tree_drag_source
+        self._tree_drag_source = None
+        self._tree_drag_start_xy = None
+        if not src or self.selected_filter_tags:
+            return
+        try:
+            px = self.root.winfo_pointerx()
+            py_scr = self.root.winfo_pointery()
+            trx = self.folder_tree.winfo_rootx()
+            tree_y = self.folder_tree.winfo_rooty()
+            tw = self.folder_tree.winfo_width()
+            th = self.folder_tree.winfo_height()
+        except tk.TclError:
+            return
+        if not (trx <= px < trx + max(tw, 1) and tree_y <= py_scr < tree_y + max(th, 1)):
+            return
+        y_local = py_scr - tree_y
+        row = self.folder_tree.identify_row(y_local)
+        if not row or row == src:
+            return
+        src_meta = self.tree_metadata.get(src) or {}
+        dst_meta = self.tree_metadata.get(row) or {}
+        if src_meta.get("type") not in {"person", "subfolder"}:
+            return
+        if dst_meta.get("type") not in {"person", "subfolder", "root"}:
+            return
+        if dst_meta.get("type") == "stub":
+            return
+
+        parent_src = self.folder_tree.parent(src)
+        parent_dst = self.folder_tree.parent(row)
+        if parent_src == parent_dst:
+            siblings = list(self.folder_tree.get_children(parent_src))
+            if src not in siblings or row not in siblings:
+                return
+            zone = self._tree_same_parent_vertical_zone(y_local, row)
+            dm = self.tree_metadata.get(row) or {}
+            if zone == "into":
+                if dm.get("type") in {"person", "subfolder"}:
+                    self._try_tree_reparent_folder_drop(src, row)
+                return
+            siblings_wo = [x for x in siblings if x != src]
+            try:
+                idx = siblings_wo.index(row)
+            except ValueError:
+                return
+            pos = idx if zone == "before" else idx + 1
+            self.folder_tree.move(src, parent_src, pos)
+            self._persist_child_order_from_tree_parent(parent_src)
+            self.set_status("已更新樹狀排序（已儲存）")
+            return
+
+        if dst_meta.get("type") == "root":
+            messagebox.showinfo("提示", "請將項目拖放到另一個資料夾上，以調整階層或與同層項目交換排序。")
+            return
+
+        self._try_tree_reparent_folder_drop(src, row)
+
+    def _migrate_tags_after_folder_move(self, old_path: Path, new_path: Path) -> None:
+        try:
+            old_rel = self.store.to_relative_key(old_path)
+        except Exception:
+            old_rel = ""
+        if not old_rel:
+            return
+        try:
+            new_rel = self.store.to_relative_key(new_path)
+            self.tag_repo.rename_relative_path_root(old_rel, new_rel)
+        except Exception:
+            self.tag_repo.remove_keys_by_prefix(old_rel)
+
+    @staticmethod
+    def _build_non_conflict_dest_dir(parent: Path, base_name: str) -> Path:
+        candidate = parent / base_name
+        if not candidate.exists():
+            return candidate
+        index = 1
+        while True:
+            next_name = f"{base_name}_moved_{index}"
+            cand = parent / next_name
+            if not cand.exists():
+                return cand
+            index += 1
+
+    def _confirm_deletion_with_checkbox(self, title: str, message: str) -> bool:
+        result = {"ok": False}
+        top = tk.Toplevel(self.root)
+        top.title(title)
+        top.transient(self.root)
+        top.grab_set()
+        frm = tk.Frame(top, padx=14, pady=12)
+        frm.pack(fill="both", expand=True)
+        tk.Label(frm, text=message, justify="left", wraplength=420).pack(anchor="w")
+        var = tk.BooleanVar(value=False)
+
+        def sync_ok() -> None:
+            btn_ok.config(state="normal" if var.get() else "disabled")
+
+        tk.Checkbutton(
+            frm,
+            text="我確認要永久刪除，且了解此操作無法復原",
+            variable=var,
+            command=sync_ok,
+        ).pack(anchor="w", pady=(10, 6))
+        btn_row = tk.Frame(frm)
+        btn_row.pack(fill="x", pady=(8, 0))
+        def _do_delete() -> None:
+            result["ok"] = True
+            top.destroy()
+
+        btn_ok = tk.Button(btn_row, text="刪除", state="disabled", command=_do_delete)
+        btn_ok.pack(side="right", padx=(6, 0))
+        tk.Button(btn_row, text="取消", command=top.destroy).pack(side="right")
+        top.wait_window(top)
+        return bool(result["ok"])
+
+    def _parent_one_level_up_clamped_to_root(self, folder: Path) -> Path:
+        """取得資料夾的上一層；若會超出主資料夾根目錄則改為根目錄本身。"""
+        try:
+            p = Path(folder).expanduser().resolve()
+        except OSError:
+            p = Path(folder).expanduser()
+        if self.store.root_folder is None:
+            return p.parent
+        root_r = Path(self.store.root_folder).resolve()
+        if p == root_r:
+            return root_r
+        par = p.parent
+        try:
+            par.relative_to(root_r)
+            return par
+        except ValueError:
+            return root_r
+
+    def _suggested_parent_path_for_new_folder_transfer(self, primary: Path) -> Path:
+        try:
+            p = Path(primary).expanduser().resolve()
+        except OSError:
+            p = Path(primary).expanduser()
+        if p.is_dir():
+            return p
+        if self.current_scope_path is not None:
+            try:
+                sp = Path(self.current_scope_path).expanduser().resolve()
+            except OSError:
+                sp = Path(self.current_scope_path).expanduser()
+            if sp.is_dir():
+                return sp
+        if self.store.root_folder is not None:
+            try:
+                rp = Path(self.store.root_folder).expanduser().resolve()
+            except OSError:
+                rp = Path(self.store.root_folder).expanduser()
+            if rp.is_dir():
+                return rp
+        return p if p.is_dir() else Path(".").resolve()
+
+    def _ask_parent_folder_for_new_transfer(self, suggested: Path) -> Optional[Path]:
+        """以可編輯欄位預填父資料夾路徑（Windows 內建選擇器常不顯示 initialdir 文字）。"""
+        suggested = self._suggested_parent_path_for_new_folder_transfer(suggested)
+        result: dict[str, Optional[Path]] = {"path": None}
+        top = tk.Toplevel(self.root)
+        top.title("新資料夾要建立在哪裡")
+        top.transient(self.root)
+        top.grab_set()
+        top.configure(bg="#2b2b2b")
+        frm = tk.Frame(top, padx=14, pady=12, bg="#2b2b2b")
+        frm.pack(fill="both", expand=True)
+        tk.Label(
+            frm,
+            text="父層資料夾（預設為「轉移來源所在層」的再上一層，可修改或按「瀏覽…」）：",
+            anchor="w",
+            bg="#2b2b2b",
+            fg="white",
+            wraplength=420,
+            justify="left",
+        ).pack(fill="x")
+        var = tk.StringVar(value=str(suggested))
+        ent = tk.Entry(
+            frm,
+            textvariable=var,
+            width=72,
+            bg="#3d3d3d",
+            fg="white",
+            insertbackground="white",
+            selectbackground="#144870",
+        )
+        ent.pack(fill="x", pady=(8, 10))
+
+        def browse() -> None:
+            cur = var.get().strip()
+            init = str(suggested)
+            if cur:
+                try:
+                    cp = Path(cur).expanduser().resolve()
+                    if cp.is_dir():
+                        init = str(cp)
+                except OSError:
+                    pass
+            picked = filedialog.askdirectory(title="選擇父層資料夾", initialdir=init)
+            if picked:
+                var.set(picked)
+
+        def ok() -> None:
+            raw = var.get().strip()
+            if not raw:
+                messagebox.showwarning("提示", "請輸入或選擇父層資料夾路徑。", parent=top)
+                return
+            try:
+                p = Path(raw).expanduser().resolve()
+            except OSError as exc:
+                messagebox.showerror("錯誤", f"路徑無效：\n{exc}", parent=top)
+                return
+            if not p.is_dir():
+                messagebox.showerror("錯誤", f"路徑不存在或不是資料夾：\n{p}", parent=top)
+                return
+            result["path"] = p
+            top.destroy()
+
+        bf = tk.Frame(frm, bg="#2b2b2b")
+        bf.pack(fill="x")
+        tk.Button(bf, text="瀏覽…", command=browse).pack(side="left", padx=(0, 8))
+        tk.Button(bf, text="確定", command=ok, width=10).pack(side="right", padx=(4, 0))
+        tk.Button(bf, text="取消", command=top.destroy, width=10).pack(side="right")
+
+        def _focus_entry() -> None:
+            try:
+                ent.focus_set()
+                ent.selection_range(0, tk.END)
+                ent.icursor(tk.END)
+            except tk.TclError:
+                pass
+
+        top.after(80, _focus_entry)
+        top.wait_window(top)
+        return result["path"]
+
+    def transfer_selected_to_new_folder(self) -> None:
+        if self.current_view_mode == "media":
+            selected = [m for m in self.current_media_items if self._item_key_for_media(m) in self.selected_media_paths]
+            if not selected and self._context_media_item is not None:
+                selected = [self._context_media_item]
+            if not selected:
+                messagebox.showinfo("提示", "請先在預覽區選取至少一個檔案。")
+                return
+            if self.current_subfolder_entry is not None:
+                base = Path(self.current_subfolder_entry.subfolder_path).resolve()
+            else:
+                base = Path(selected[0].media_path).resolve().parent
+            suggested_parent = self._parent_one_level_up_clamped_to_root(base)
+        else:
+            selected_entries = [e for e in self.current_entries if self._item_key_for_entry(e) in self.selected_entry_keys]
+            if not selected_entries and self._context_target is not None and self.current_view_mode == "entries":
+                selected_entries = [self._context_target]
+            if not selected_entries:
+                messagebox.showinfo("提示", "請先在預覽區選取至少一個資料夾。")
+                return
+            base = Path(selected_entries[0].subfolder_path).resolve().parent
+            suggested_parent = self._parent_one_level_up_clamped_to_root(base)
+
+        parent_path = self._ask_parent_folder_for_new_transfer(suggested_parent)
+        if parent_path is None:
+            return
+
+        new_name = simpledialog.askstring(
+            "新資料夾名稱",
+            f"將在「{parent_path.name}」底下建立資料夾，並移入已選項目：",
+            parent=self.root,
+        )
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not self._is_valid_folder_basename(new_name):
+            messagebox.showwarning("警告", "名稱無效：不可為空，且不可包含 \\ / : * ? \" < > | 等字元。")
+            return
+
+        new_folder = parent_path / new_name
+        if new_folder.exists():
+            messagebox.showerror("錯誤", f"已存在同名項目：{new_name}")
+            return
+
+        try:
+            new_folder.mkdir(parents=False, exist_ok=False)
+        except OSError as exc:
+            messagebox.showerror("建立失敗", str(exc))
+            return
+
+        if self.current_view_mode == "media":
+            if not messagebox.askyesno(
+                "確認轉移",
+                f"確定將 {len(selected)} 個檔案移動到新資料夾「{new_name}」？",
+            ):
+                try:
+                    new_folder.rmdir()
+                except OSError:
+                    pass
+                return
+            moved_count = 0
+            renamed_count = 0
+            failed_count = 0
+            touched_parents: set[Path] = set()
+            for item in selected:
+                src = Path(item.media_path).resolve()
+                if not src.is_file():
+                    failed_count += 1
+                    continue
+                dst = new_folder / src.name
+                if dst.exists():
+                    dst = self._build_non_conflict_file_path(new_folder, src.name)
+                    renamed_count += 1
+                try:
+                    shutil.move(str(src), str(dst))
+                    moved_count += 1
+                    touched_parents.add(src.parent)
+                except OSError:
+                    failed_count += 1
+            for p in touched_parents:
+                self.store.invalidate_folder_cache(p)
+            cur = self.current_subfolder_entry
+            if cur is not None and self.current_view_mode == "media":
+                self.render_subfolder_media(cur)
+            self._refresh_tree_after_new_folder_transfer(parent_path, new_folder)
+            self.set_status(
+                f"已建立「{new_name}」並移入檔案：成功 {moved_count}，改名 {renamed_count}，失敗 {failed_count}"
+            )
+            return
+
+        selected_entries = [e for e in self.current_entries if self._item_key_for_entry(e) in self.selected_entry_keys]
+        if not selected_entries and self._context_target is not None:
+            selected_entries = [self._context_target]
+        if not messagebox.askyesno(
+            "確認轉移",
+            f"確定將 {len(selected_entries)} 個資料夾移入新資料夾「{new_name}」？\n"
+            "（整個資料夾會搬移到該路徑下；若同名已存在將自動改名）",
+        ):
+            try:
+                new_folder.rmdir()
+            except OSError:
+                pass
+            return
+
+        moved_ok = 0
+        failed_count = 0
+        for entry in selected_entries:
+            src = Path(entry.subfolder_path).resolve()
+            if not src.is_dir():
+                failed_count += 1
+                continue
+            if new_folder.resolve() == src.resolve() or new_folder.resolve().is_relative_to(src.resolve()):
+                failed_count += 1
+                continue
+            dest = self._build_non_conflict_dest_dir(new_folder, src.name)
+            try:
+                shutil.move(str(src), str(dest))
+            except OSError:
+                failed_count += 1
+                continue
+            self._migrate_tags_after_folder_move(src, dest)
+            self._tree_order_after_delete_folder(src)
+            self._append_name_to_tree_order(new_folder, dest.name)
+            moved_ok += 1
+
+        self.store.clear_cache()
+        self._refresh_tree_after_new_folder_transfer(parent_path, new_folder)
+        self.set_status(f"已建立「{new_name}」並移入資料夾：成功 {moved_ok}，失敗 {failed_count}")
+
+    def delete_selected_preview_items(self) -> None:
+        if self.current_view_mode == "media":
+            selected = [m for m in self.current_media_items if self._item_key_for_media(m) in self.selected_media_paths]
+            if not selected and self._context_media_item is not None:
+                selected = [self._context_media_item]
+            if not selected:
+                messagebox.showinfo("提示", "請先選取要刪除的檔案。")
+                return
+            names = "\n".join(Path(m.media_path).name for m in selected[:12])
+            extra = f"\n… 等共 {len(selected)} 個檔案" if len(selected) > 12 else ""
+            msg = f"即將永久刪除以下檔案：\n\n{names}{extra}"
+            if not self._confirm_deletion_with_checkbox("刪除檔案", msg):
+                return
+            deleted = 0
+            failed = 0
+            parents: set[Path] = set()
+            for item in selected:
+                p = Path(item.media_path).resolve()
+                if not p.is_file():
+                    failed += 1
+                    continue
+                try:
+                    p.unlink()
+                    deleted += 1
+                    parents.add(p.parent)
+                except OSError:
+                    failed += 1
+            for par in parents:
+                self.store.invalidate_folder_cache(par)
+            cur = self.current_subfolder_entry
+            if cur is not None:
+                self.render_subfolder_media(cur)
+            self.set_status(f"已刪除 {deleted} 個檔案" + (f"，{failed} 個失敗" if failed else ""))
+            return
+
+        if self.current_view_mode != "entries":
+            messagebox.showinfo("提示", "請在子資料夾預覽中選取要刪除的項目。")
+            return
+
+        selected_entries = [e for e in self.current_entries if self._item_key_for_entry(e) in self.selected_entry_keys]
+        if not selected_entries and self._context_target is not None:
+            selected_entries = [self._context_target]
+        if not selected_entries:
+            messagebox.showinfo("提示", "請先選取要刪除的資料夾。")
+            return
+
+        if self.store.root_folder and any(
+            Path(e.subfolder_path).resolve() == Path(self.store.root_folder).resolve() for e in selected_entries
+        ):
+            messagebox.showwarning("警告", "不可刪除主資料夾。")
+            return
+
+        preview = "\n".join(e.subfolder_name for e in selected_entries[:15])
+        extra = f"\n… 等共 {len(selected_entries)} 個資料夾" if len(selected_entries) > 15 else ""
+        msg = f"即將永久刪除以下資料夾及其所有內容：\n\n{preview}{extra}"
+        if not self._confirm_deletion_with_checkbox("刪除資料夾", msg):
+            return
+
+        tree_state = self._capture_tree_state()
+        deleted_resolved: list[Path] = []
+        deleted_n = 0
+        failed = 0
+        for entry in selected_entries:
+            folder = Path(entry.subfolder_path).resolve()
+            if self.store.root_folder and folder == Path(self.store.root_folder).resolve():
+                failed += 1
+                continue
+            if not folder.is_dir():
+                failed += 1
+                continue
+            try:
+                rel = ""
+                try:
+                    rel = self.store.to_relative_key(folder)
+                except Exception:
+                    pass
+                if rel:
+                    self.tag_repo.remove_keys_by_prefix(rel)
+                self.store.delete_folder(folder)
+                self._tree_order_after_delete_folder(folder)
+                deleted_resolved.append(folder.resolve())
+                deleted_n += 1
+            except Exception:
+                failed += 1
+
+        tree_state = self._prune_tree_state_after_deleted_paths(tree_state, deleted_resolved)
+        self.selected_entry_keys.clear()
+        self.refresh_tree(restore_state=tree_state)
+        self.set_status(f"已刪除 {deleted_n} 個資料夾" + (f"，{failed} 個失敗" if failed else ""))
 
     def _build_entry_for_folder(self, folder: Path, person_name: str) -> SubfolderEntry:
         preview_path, preview_type, media_count = self.store.get_folder_media_info(folder)
@@ -1392,8 +2310,10 @@ class PeopleFolderManagerApp:
     def _merged_entries_background(self) -> tuple[list[SubfolderEntry], dict[str, list[SubfolderEntry]]]:
         per_person: dict[str, list[SubfolderEntry]] = {}
         merged: list[SubfolderEntry] = []
-        for person_folder in self.store.get_people_folders():
-            entries = self.store.get_subfolder_entries_shallow(person_folder)
+        for person_folder in self._get_ordered_people_folders():
+            entries = self._order_entries_by_saved_tree(
+                person_folder, self.store.get_subfolder_entries_shallow(person_folder)
+            )
             per_person[person_folder.name] = entries
             merged.extend(entries)
         return merged, per_person
@@ -1452,6 +2372,7 @@ class PeopleFolderManagerApp:
         except Exception as exc:
             messagebox.showerror("錯誤", f"載入子資料夾清單失敗：\n{exc}")
             return
+        entries = self._order_entries_by_saved_tree(person_folder, entries)
         self.person_entries[person_folder.name] = entries
         self.render_entries(entries, reuse_session=sid)
 
@@ -1490,7 +2411,7 @@ class PeopleFolderManagerApp:
                     merged_tf.extend(entries)
                 self.render_entries(merged_tf)
             else:
-                people = self.store.get_people_folders()
+                people = self._get_ordered_people_folders()
                 want = {p.name for p in people}
                 if want and want == set(self.person_entries.keys()):
                     merged: list[SubfolderEntry] = []
@@ -2187,7 +3108,9 @@ class PeopleFolderManagerApp:
             self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="disabled")
             self.context_menu.entryconfig("轉移已選取項目到…", state="disabled")
+            self.context_menu.entryconfig("轉移並建立新資料夾…", state="disabled")
             self.context_menu.entryconfig("重新命名與添加序號…", state="disabled")
+            self.context_menu.entryconfig("刪除選取的檔案或資料夾…", state="disabled")
             self.context_menu.entryconfig("刪除資料夾", state="disabled")
         elif node_type == "subfolder":
             self._context_target = self._entry_for_tree_subfolder(payload)
@@ -2198,7 +3121,9 @@ class PeopleFolderManagerApp:
             self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
             self.context_menu.entryconfig("轉移已選取項目到…", state="disabled")
+            self.context_menu.entryconfig("轉移並建立新資料夾…", state="disabled")
             self.context_menu.entryconfig("重新命名與添加序號…", state="disabled")
+            self.context_menu.entryconfig("刪除選取的檔案或資料夾…", state="disabled")
             self.context_menu.entryconfig("刪除資料夾", state="normal")
         elif node_type == "person":
             person_folder = payload.get("path")
@@ -2219,7 +3144,9 @@ class PeopleFolderManagerApp:
             self.context_menu.entryconfig("重新命名檔案", state="disabled")
             self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
             self.context_menu.entryconfig("轉移已選取項目到…", state="disabled")
+            self.context_menu.entryconfig("轉移並建立新資料夾…", state="disabled")
             self.context_menu.entryconfig("重新命名與添加序號…", state="disabled")
+            self.context_menu.entryconfig("刪除選取的檔案或資料夾…", state="disabled")
             self.context_menu.entryconfig("刪除資料夾", state="normal")
         else:
             self._context_target = None
@@ -2241,7 +3168,9 @@ class PeopleFolderManagerApp:
         self.context_menu.entryconfig("重新命名檔案", state="disabled")
         self.context_menu.entryconfig("轉移資料夾內容到…", state="normal")
         self.context_menu.entryconfig("轉移已選取項目到…", state="normal")
+        self.context_menu.entryconfig("轉移並建立新資料夾…", state="normal")
         self.context_menu.entryconfig("重新命名與添加序號…", state="normal")
+        self.context_menu.entryconfig("刪除選取的檔案或資料夾…", state="normal")
         self.context_menu.entryconfig("刪除資料夾", state="normal")
         self.context_menu.post(event.x_root, event.y_root)
 
@@ -2260,7 +3189,9 @@ class PeopleFolderManagerApp:
         self.context_menu.entryconfig("重新命名檔案", state="normal")
         self.context_menu.entryconfig("轉移資料夾內容到…", state="disabled")
         self.context_menu.entryconfig("轉移已選取項目到…", state="normal")
+        self.context_menu.entryconfig("轉移並建立新資料夾…", state="normal")
         self.context_menu.entryconfig("重新命名與添加序號…", state="normal")
+        self.context_menu.entryconfig("刪除選取的檔案或資料夾…", state="normal")
         self.context_menu.entryconfig("刪除資料夾", state="disabled")
         self.context_menu.post(event.x_root, event.y_root)
 
@@ -2388,6 +3319,7 @@ class PeopleFolderManagerApp:
             new_rel = ""
         if old_rel and new_rel:
             self.tag_repo.rename_relative_path_root(old_rel, new_rel)
+        self._rewrite_tree_order_after_rename(folder, new_path)
 
         self.store.clear_cache()
         media_snap = self._snapshot_media_view()
@@ -2822,23 +3754,22 @@ class PeopleFolderManagerApp:
         ):
             return
 
+        folder_path = Path(folder).resolve()
         try:
             file_count = self.store.delete_folder(folder)
         except Exception as exc:
             messagebox.showerror("刪除失敗", str(exc))
             return
 
-        prefix = self._path_key(folder)
         try:
-            relative_prefix = self.store.to_relative_key(folder)
+            relative_prefix = self.store.to_relative_key(folder_path)
         except Exception:
             relative_prefix = ""
         if relative_prefix:
             self.tag_repo.remove_keys_by_prefix(relative_prefix)
+        self._tree_order_after_delete_folder(folder_path)
 
-        tree_state = self._capture_tree_state()
-        if tree_state.get("selected_path") == prefix:
-            tree_state["selected_path"] = self._path_key(folder.parent)
+        tree_state = self._prune_tree_state_after_deleted_paths(self._capture_tree_state(), [folder_path])
         self.refresh_tree(restore_state=tree_state)
         self.set_status(f"已刪除資料夾：{folder.name}（移除 {file_count} 個檔案）")
 
