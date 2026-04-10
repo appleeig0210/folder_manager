@@ -64,6 +64,7 @@ class ThumbnailService:
         self._index_lock = threading.Lock()
         self._memory_cache: dict[str, Image.Image] = {}
         self._cache_order: list[str] = []
+        self._video_duration_cache: dict[str, Optional[float]] = {}
         self._video_semaphore = threading.Semaphore(2)
         self._disk_index = self._load_disk_index()
 
@@ -281,10 +282,25 @@ class ThumbnailService:
         return total if total > 0 else None
 
     def get_video_duration_seconds(self, video_path: Path) -> Optional[float]:
+        cache_key = self._build_file_cache_key(video_path, "video_duration", (0, 0))
+        with self._cache_lock:
+            if cache_key in self._video_duration_cache:
+                return self._video_duration_cache[cache_key]
+
         d = self._probe_duration_seconds(video_path)
         if d is not None:
+            with self._cache_lock:
+                self._video_duration_cache[cache_key] = d
             return d
-        return self._probe_duration_via_ffmpeg_stderr(video_path)
+        d = self._probe_duration_via_ffmpeg_stderr(video_path)
+        with self._cache_lock:
+            self._video_duration_cache[cache_key] = d
+            # Keep duration cache bounded to avoid unbounded memory growth.
+            if len(self._video_duration_cache) > self.max_cache_size * 6:
+                stale_key = next(iter(self._video_duration_cache.keys()), None)
+                if stale_key is not None:
+                    self._video_duration_cache.pop(stale_key, None)
+        return d
 
     @staticmethod
     def format_video_duration(seconds: float) -> str:
@@ -406,6 +422,7 @@ class PeopleFolderManagerApp:
         self._tree_drop_line: Optional[tk.Frame] = None
         self._tree_drop_child_frame: Optional[tk.Frame] = None
         self._tree_drag_visual_active = False
+        self._folder_media_filter_cache: dict[tuple[str, str], bool] = {}
 
         self._build_layout()
         self._apply_saved_root()
@@ -764,6 +781,7 @@ class PeopleFolderManagerApp:
         self.folder_tree.delete(*self.folder_tree.get_children())
         self.tree_metadata.clear()
         self.path_node_index.clear()
+        self._folder_media_filter_cache.clear()
         self.person_entries.clear()
         self.current_entries = []
         self.current_media_items = []
@@ -849,34 +867,97 @@ class PeopleFolderManagerApp:
             return has_image
         return True
 
-    def _tree_folder_visible_with_media_filter(self, folder: Path) -> bool:
-        if not self._media_type_filter_enabled():
+    @staticmethod
+    def _duration_filter_enabled(lo_min: Optional[float], hi_min: Optional[float]) -> bool:
+        return lo_min is not None or hi_min is not None
+
+    def _media_item_matches_filter(
+        self,
+        item: MediaItem,
+        want_video: bool,
+        want_image: bool,
+        lo_min: Optional[float],
+        hi_min: Optional[float],
+    ) -> bool:
+        if item.media_type == "image":
+            if want_video and not want_image:
+                return False
             return True
-        if self._folder_matches_media_type_filter(folder):
+        if item.media_type != "video":
+            return False
+        if want_image and not want_video:
+            return False
+        if not self._duration_filter_enabled(lo_min, hi_min):
             return True
+        sec = self.thumbnail_service.get_video_duration_seconds(item.media_path)
+        if sec is None:
+            return False
+        lo_s = (lo_min * 60.0) if lo_min is not None else 0.0
+        hi_s = (hi_min * 60.0) if hi_min is not None else float("inf")
+        return lo_s <= sec <= hi_s
+
+    def _folder_matches_active_media_filter(
+        self,
+        folder: Path,
+        lo_min: Optional[float],
+        hi_min: Optional[float],
+        want_video: bool,
+        want_image: bool,
+    ) -> bool:
+        signature = f"v={int(want_video)}|i={int(want_image)}|lo={lo_min}|hi={hi_min}"
+        cache_key = (self._path_key(folder), signature)
+        cached = self._folder_media_filter_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        items = self.store.list_media_items(folder)
+        matched = any(
+            self._media_item_matches_filter(item, want_video, want_image, lo_min, hi_min)
+            for item in items
+        )
+        self._folder_media_filter_cache[cache_key] = matched
+        return matched
+
+    def _get_duration_bounds_for_tree_filter(self) -> tuple[Optional[float], Optional[float]]:
         try:
-            for sub in self.store.get_subfolders(folder):
-                if self._tree_folder_visible_with_media_filter(sub):
-                    return True
-        except Exception:
-            pass
-        return False
+            return self._parse_duration_filter_minutes()
+        except ValueError:
+            # While typing invalid text, do not break tree refresh; "套用" still validates strictly.
+            return None, None
+
+    def _tree_folder_visible_with_media_filter(self, folder: Path) -> bool:
+        lo_min, hi_min = self._get_duration_bounds_for_tree_filter()
+        want_v = self.filter_media_video_var.get()
+        want_i = self.filter_media_image_var.get()
+        if not want_v and not want_i and not self._duration_filter_enabled(lo_min, hi_min):
+            return True
+        return self._folder_matches_active_media_filter(folder, lo_min, hi_min, want_v, want_i)
 
     def _folder_has_visible_subdirs_for_tree(self, folder_path: Path) -> bool:
-        if not self._media_type_filter_enabled():
+        lo_min, hi_min = self._get_duration_bounds_for_tree_filter()
+        want_v = self.filter_media_video_var.get()
+        want_i = self.filter_media_image_var.get()
+        if not want_v and not want_i and not self._duration_filter_enabled(lo_min, hi_min):
             return self._folder_has_subdirs(folder_path)
         try:
             for sub in self.store.get_subfolders(folder_path):
-                if self._tree_folder_visible_with_media_filter(sub):
+                if self._folder_matches_active_media_filter(sub, lo_min, hi_min, want_v, want_i):
                     return True
         except Exception:
             return False
         return False
 
     def _apply_media_entry_filter(self, entries: list[SubfolderEntry]) -> list[SubfolderEntry]:
-        if not self._media_type_filter_enabled():
+        lo_min, hi_min = self._get_duration_bounds_for_tree_filter()
+        want_v = self.filter_media_video_var.get()
+        want_i = self.filter_media_image_var.get()
+        if not want_v and not want_i and not self._duration_filter_enabled(lo_min, hi_min):
             return entries
-        return [e for e in entries if self._tree_folder_visible_with_media_filter(e.subfolder_path)]
+        return [
+            e
+            for e in entries
+            if self._folder_matches_active_media_filter(e.subfolder_path, lo_min, hi_min, want_v, want_i)
+        ]
 
     def _filter_media_items_by_type_list(
         self, items: list[MediaItem], want_v: bool, want_i: bool
@@ -970,8 +1051,7 @@ class PeopleFolderManagerApp:
         except ValueError as exc:
             messagebox.showerror("影片長度篩選", str(exc))
             return
-        if self.current_view_mode == "media" and self.current_subfolder_entry is not None:
-            self.render_subfolder_media(self.current_subfolder_entry)
+        self._refresh_tree_and_reload_selection()
 
     def _refresh_tree_and_reload_selection(self) -> None:
         tree_state = self._capture_tree_state()
@@ -990,7 +1070,13 @@ class PeopleFolderManagerApp:
         self._refresh_tree_and_reload_selection()
 
     def _collect_tag_filter_state_for_person(
-        self, person_folder: Path, person_name: str
+        self,
+        person_folder: Path,
+        person_name: str,
+        lo_min: Optional[float],
+        hi_min: Optional[float],
+        want_video: bool,
+        want_image: bool,
     ) -> tuple[set[str], list[SubfolderEntry]]:
         matching_keys: set[str] = set()
         try:
@@ -1002,7 +1088,7 @@ class PeopleFolderManagerApp:
                     except Exception:
                         continue
                     if self._relative_key_matches_tag_filter(rk):
-                        if not self._folder_matches_media_type_filter(path):
+                        if not self._folder_matches_active_media_filter(path, lo_min, hi_min, want_video, want_image):
                             continue
                         matching_keys.add(rk)
         except Exception:
@@ -1024,10 +1110,20 @@ class PeopleFolderManagerApp:
         return visible, entries
 
     def _build_tag_filtered_tree(self, root_node: str) -> None:
+        lo_min, hi_min = self._get_duration_bounds_for_tree_filter()
+        want_v = self.filter_media_video_var.get()
+        want_i = self.filter_media_image_var.get()
         for person_folder in self._get_ordered_people_folders():
-            if not self._tree_folder_visible_with_media_filter(person_folder):
+            if not self._folder_matches_active_media_filter(person_folder, lo_min, hi_min, want_v, want_i):
                 continue
-            visible, matching_entries = self._collect_tag_filter_state_for_person(person_folder, person_folder.name)
+            visible, matching_entries = self._collect_tag_filter_state_for_person(
+                person_folder,
+                person_folder.name,
+                lo_min,
+                hi_min,
+                want_v,
+                want_i,
+            )
             if not visible:
                 continue
             person_node = self.folder_tree.insert(root_node, "end", text=person_folder.name, open=True)
@@ -1443,14 +1539,16 @@ class PeopleFolderManagerApp:
         self.folder_tree.update_idletasks()
         ox = self.folder_tree.winfo_x()
         oy = self.folder_tree.winfo_y()
-        w = max(self.folder_tree.winfo_width(), 4)
+        bx, _by, _bw2, _bh2 = bbox
+        left = ox + max(bx - 2, 0)
+        w = max(self.folder_tree.winfo_width() - (left - ox), 24)
         if self._tree_drop_child_frame is not None:
             try:
                 self._tree_drop_child_frame.place_forget()
             except tk.TclError:
                 pass
         line = self._ensure_tree_drop_line()
-        line.place(in_=self._tree_host, x=ox, y=oy + y_line, width=w, height=3)
+        line.place(in_=self._tree_host, x=left, y=oy + y_line, width=w, height=3)
 
     def _show_tree_drop_as_child_highlight(self, item_id: str) -> None:
         if self._tree_host is None:
@@ -1488,38 +1586,103 @@ class PeopleFolderManagerApp:
             return "after"
         return "into"
 
-    def _try_tree_reparent_folder_drop(self, src: str, dst_row: str) -> bool:
-        """將樹節點 src 對應的資料夾移入 dst_row 底下；成功回傳 True。"""
+    def _tree_drop_intent(self, src: str, row: str, y_local: float) -> tuple[Optional[str], Optional[str], Optional[int]]:
+        """
+        回傳拖放意圖：
+        - action: "into"（成為 row 子項）或 "insert"（插到 row 同層前/後）
+        - target_parent: 目標父節點（Tree item id）
+        - insert_index: action 為 insert 時使用
+        """
+        if not src or not row or src == row:
+            return None, None, None
         src_meta = self.tree_metadata.get(src) or {}
-        dst_meta = self.tree_metadata.get(dst_row) or {}
+        dst_meta = self.tree_metadata.get(row) or {}
+        if src_meta.get("type") not in {"person", "subfolder"}:
+            return None, None, None
+        if dst_meta.get("type") not in {"root", "person", "subfolder"}:
+            return None, None, None
+        if dst_meta.get("type") == "stub":
+            return None, None, None
+
+        zone = self._tree_same_parent_vertical_zone(y_local, row)
+        if dst_meta.get("type") == "root":
+            return None, None, None
+        if zone == "into":
+            return "into", row, None
+
+        target_parent = self.folder_tree.parent(row)
+        if not target_parent and src:
+            target_parent = self.folder_tree.parent(src)
+        siblings = [
+            cid
+            for cid in self.folder_tree.get_children(target_parent)
+            if (self.tree_metadata.get(cid) or {}).get("type") in {"person", "subfolder"}
+        ]
+        if src in siblings:
+            siblings = [x for x in siblings if x != src]
+        try:
+            idx = siblings.index(row)
+        except ValueError:
+            return None, None, None
+        insert_index = idx if zone == "before" else idx + 1
+        return "insert", target_parent, insert_index
+
+    def _insert_name_to_tree_order(self, parent_path: Path, name: str, index: int) -> None:
+        key = self._path_key(parent_path)
+        order_map = self._ensure_tree_child_order_dict()
+        cur = list(order_map.get(key)) if isinstance(order_map.get(key), list) else []
+        cur = [x for x in cur if x != name]
+        safe_idx = max(0, min(int(index), len(cur)))
+        cur.insert(safe_idx, name)
+        order_map[key] = cur
+        self._save_config()
+
+    def _try_tree_move_folder_to_parent(
+        self,
+        src: str,
+        target_parent_row: str,
+        insert_index: Optional[int] = None,
+    ) -> bool:
+        """
+        將 src 對應資料夾移到 target_parent_row 之下。
+        insert_index 為 None 時代表附加到尾端；否則插入指定順序索引。
+        """
+        src_meta = self.tree_metadata.get(src) or {}
+        parent_meta = self.tree_metadata.get(target_parent_row) or {}
         if src_meta.get("type") not in {"person", "subfolder"}:
             return False
-        if dst_meta.get("type") not in {"person", "subfolder"}:
+        if parent_meta.get("type") not in {"root", "person", "subfolder"}:
             return False
         src_path = Path(src_meta["path"]).resolve()
-        dst_path = Path(dst_meta["path"]).resolve()
-        if not src_path.is_dir() or not dst_path.is_dir():
+        if parent_meta.get("type") == "root":
+            if self.store.root_folder is None:
+                return False
+            target_parent_path = Path(self.store.root_folder).resolve()
+            parent_label = target_parent_path.name
+        else:
+            target_parent_path = Path(parent_meta["path"]).resolve()
+            parent_label = target_parent_path.name
+        if not src_path.is_dir() or not target_parent_path.is_dir():
             return False
-        if self.store.root_folder is None:
+
+        if src_path.parent == target_parent_path and insert_index is not None:
             return False
-        root_r = Path(self.store.root_folder).resolve()
+        if src_path.parent == target_parent_path and insert_index is None:
+            return False
+
         try:
-            src_path.relative_to(root_r)
-        except ValueError:
-            messagebox.showerror("錯誤", "只能搬移主資料夾底下的項目。")
-            return False
-        try:
-            if dst_path.resolve() == src_path.resolve() or dst_path.resolve().is_relative_to(src_path.resolve()):
+            if target_parent_path == src_path or target_parent_path.is_relative_to(src_path):
                 messagebox.showerror("錯誤", "目標不可位於被拖曳的資料夾內部。")
                 return False
         except (ValueError, OSError):
             messagebox.showerror("錯誤", "無法驗證搬移路徑。")
             return False
 
-        dest_dir = self._build_non_conflict_dest_dir(dst_path, src_path.name)
+        dest_dir = self._build_non_conflict_dest_dir(target_parent_path, src_path.name)
+        action_desc = "移入" if insert_index is None else "插入"
         if not messagebox.askyesno(
             "確認搬移資料夾",
-            f"確定將「{src_path.name}」移動到「{dst_path.name}」底下？\n"
+            f"確定將「{src_path.name}」{action_desc}到「{parent_label}」底下？\n"
             f"新位置：{dest_dir}\n\n（標籤鍵將盡力同步；實體檔案會一併搬移）",
         ):
             return False
@@ -1534,7 +1697,10 @@ class PeopleFolderManagerApp:
         self._migrate_tags_after_folder_move(src_path, dest_dir)
         self.store.clear_cache()
         self._remove_name_from_tree_order(old_parent, src_path.name)
-        self._append_name_to_tree_order(dst_path, dest_dir.name)
+        if insert_index is None:
+            self._append_name_to_tree_order(target_parent_path, dest_dir.name)
+        else:
+            self._insert_name_to_tree_order(target_parent_path, dest_dir.name, insert_index)
 
         tree_state = self._capture_tree_state()
         old_r = src_path.resolve()
@@ -1564,6 +1730,10 @@ class PeopleFolderManagerApp:
         self.set_status(f"已搬移資料夾至：{dest_dir}")
         return True
 
+    def _try_tree_reparent_folder_drop(self, src: str, dst_row: str) -> bool:
+        """將樹節點 src 對應的資料夾移入 dst_row 底下；成功回傳 True。"""
+        return self._try_tree_move_folder_to_parent(src, dst_row, insert_index=None)
+
     def _on_tree_drag_press(self, event: tk.Event) -> None:
         self._tree_drag_source = None
         self._tree_drag_start_xy = None
@@ -1590,7 +1760,7 @@ class PeopleFolderManagerApp:
             self._hide_tree_drop_visual()
             return
         self._tree_drag_visual_active = True
-        self._show_drag_hint("上／下緣：調整順序；列中間：移入該資料夾", event.x_root, event.y_root)
+        self._show_drag_hint("上緣/下緣：插入到該層級；列中間：移入該資料夾", event.x_root, event.y_root)
         self._move_drag_hint(event.x_root, event.y_root)
 
         row = self.folder_tree.identify_row(event.y)
@@ -1602,34 +1772,14 @@ class PeopleFolderManagerApp:
             self._hide_tree_drop_visual()
             return
 
-        parent_src = self.folder_tree.parent(src)
-        parent_dst = self.folder_tree.parent(row)
-        if parent_src == parent_dst:
-            siblings = list(self.folder_tree.get_children(parent_src))
-            if src not in siblings or row not in siblings:
-                self._hide_tree_drop_visual()
-                return
-            zone = self._tree_same_parent_vertical_zone(float(event.y), row)
-            dm = self.tree_metadata.get(row) or {}
-            if zone == "into" and dm.get("type") in {"person", "subfolder"}:
-                self._show_tree_drop_as_child_highlight(row)
-                return
-            if zone == "before":
-                self._show_tree_drop_insert_line(row, True)
-                return
-            if zone == "after":
-                self._show_tree_drop_insert_line(row, False)
-                return
-            self._hide_tree_drop_visual()
+        action, _target_parent, insert_index = self._tree_drop_intent(src, row, float(event.y))
+        if action == "into":
+            self._show_tree_drop_as_child_highlight(row)
             return
-
-        if dst_meta.get("type") == "root":
-            self._hide_tree_drop_visual()
+        if action == "insert":
+            self._show_tree_drop_insert_line(row, before=(insert_index is not None and insert_index >= 0 and self._tree_same_parent_vertical_zone(float(event.y), row) == "before"))
             return
-        if dst_meta.get("type") not in {"person", "subfolder"}:
-            self._hide_tree_drop_visual()
-            return
-        self._show_tree_drop_as_child_highlight(row)
+        self._hide_tree_drop_visual()
 
     def _on_root_button1_release_tree_drag(self, event: tk.Event) -> None:
         tree_dragging = self._tree_drag_source is not None or self._tree_drag_visual_active
@@ -1666,34 +1816,28 @@ class PeopleFolderManagerApp:
         if dst_meta.get("type") == "stub":
             return
 
-        parent_src = self.folder_tree.parent(src)
-        parent_dst = self.folder_tree.parent(row)
-        if parent_src == parent_dst:
-            siblings = list(self.folder_tree.get_children(parent_src))
-            if src not in siblings or row not in siblings:
-                return
-            zone = self._tree_same_parent_vertical_zone(y_local, row)
-            dm = self.tree_metadata.get(row) or {}
-            if zone == "into":
-                if dm.get("type") in {"person", "subfolder"}:
-                    self._try_tree_reparent_folder_drop(src, row)
+        action, target_parent, insert_index = self._tree_drop_intent(src, row, y_local)
+        if action == "into":
+            self._try_tree_reparent_folder_drop(src, row)
+            return
+        if action != "insert" or target_parent is None or insert_index is None:
+            return
+        src_parent = self.folder_tree.parent(src)
+        if src_parent == target_parent:
+            siblings = [
+                cid
+                for cid in self.folder_tree.get_children(src_parent)
+                if (self.tree_metadata.get(cid) or {}).get("type") in {"person", "subfolder"}
+            ]
+            if src not in siblings:
                 return
             siblings_wo = [x for x in siblings if x != src]
-            try:
-                idx = siblings_wo.index(row)
-            except ValueError:
-                return
-            pos = idx if zone == "before" else idx + 1
-            self.folder_tree.move(src, parent_src, pos)
-            self._persist_child_order_from_tree_parent(parent_src)
+            pos = max(0, min(int(insert_index), len(siblings_wo)))
+            self.folder_tree.move(src, src_parent, pos)
+            self._persist_child_order_from_tree_parent(src_parent)
             self.set_status("已更新樹狀排序（已儲存）")
             return
-
-        if dst_meta.get("type") == "root":
-            messagebox.showinfo("提示", "請將項目拖放到另一個資料夾上，以調整階層或與同層項目交換排序。")
-            return
-
-        self._try_tree_reparent_folder_drop(src, row)
+        self._try_tree_move_folder_to_parent(src, target_parent, insert_index=insert_index)
 
     def _migrate_tags_after_folder_move(self, old_path: Path, new_path: Path) -> None:
         try:
