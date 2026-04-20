@@ -28,6 +28,13 @@ from people_data_store import MediaItem, PeopleDataStore, SubfolderEntry
 from tag_repository import TagRepository
 
 try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES, COPY
+except Exception:
+    TkinterDnD = None
+    DND_FILES = None
+    COPY = None
+
+try:
     import imageio_ffmpeg
 except Exception:
     imageio_ffmpeg = None
@@ -48,8 +55,15 @@ MEDIA_BATCH_SIZE = 16
 THUMB_YVIEW_LOAD_THRESHOLD = 0.78
 THUMB_YVIEW_DEBOUNCE_MS = 90
 
-ctk.set_appearance_mode("dark")
+ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
+
+
+if TkinterDnD is not None:
+    class _DnDCTk(ctk.CTk, TkinterDnD.DnDWrapper):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.TkdndVersion = TkinterDnD._require(self)
 
 
 class ThumbnailService:
@@ -344,7 +358,7 @@ class ThumbnailService:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def _fit_image(self, image: Image.Image, size: tuple[int, int]) -> Image.Image:
-        canvas = Image.new("RGB", size, "#1f1f1f")
+        canvas = Image.new("RGB", size, "#f3f4f6")
         copy = image.copy()
         copy.thumbnail(size, Image.Resampling.LANCZOS)
         x = (size[0] - copy.width) // 2
@@ -353,16 +367,24 @@ class ThumbnailService:
         return canvas
 
     def _build_placeholder(self, text: str, size: tuple[int, int]) -> Image.Image:
-        image = Image.new("RGB", size, "#2b2b2b")
+        image = Image.new("RGB", size, "#f3f4f6")
         draw = ImageDraw.Draw(image)
-        draw.rectangle((0, 0, size[0] - 1, size[1] - 1), outline="#555555", width=1)
-        draw.text((14, size[1] // 2 - 6), text, fill="#b5b5b5")
+        draw.rectangle((0, 0, size[0] - 1, size[1] - 1), outline="#e5e7eb", width=1)
+        draw.text((14, size[1] // 2 - 6), text, fill="#6b7280")
         return image
 
 
 class PeopleFolderManagerApp:
     def __init__(self):
-        self.root = ctk.CTk()
+        self._dnd_available = False
+        if TkinterDnD is not None:
+            try:
+                self.root = _DnDCTk()
+                self._dnd_available = True
+            except Exception:
+                self.root = ctk.CTk()
+        else:
+            self.root = ctk.CTk()
         self.root.title("人物資料夾管理器")
         self.root.geometry("1760x920")
 
@@ -423,12 +445,48 @@ class PeopleFolderManagerApp:
         self._tree_drop_child_frame: Optional[tk.Frame] = None
         self._tree_drag_visual_active = False
         self._folder_media_filter_cache: dict[tuple[str, str], bool] = {}
+        self.preview_sort_mode: str = "name"  # name | time | type
+        self._preview_sort_menu: Optional[tk.Menu] = None
 
+        self._init_visual_style()
         self._build_layout()
         self._apply_saved_root()
         self.refresh_tree()
         self.refresh_filter_panel()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    @staticmethod
+    def _platform_font_family() -> str:
+        if sys.platform.startswith("win"):
+            return "Segoe UI"
+        if sys.platform == "darwin":
+            return "SF Pro Display"
+        return "DejaVu Sans"
+
+    def _init_visual_style(self) -> None:
+        self.ui_colors = {
+            "bg": "#f6f7fb",
+            "panel": "#ffffff",
+            "panel2": "#f9fafb",
+            "border": "#e5e7eb",
+            "text": "#111827",
+            "muted": "#6b7280",
+            "accent": "#2563eb",
+            "accent_soft": "#dbeafe",
+        }
+
+        family = self._platform_font_family()
+        self.font_base = ctk.CTkFont(family=family, size=12)
+        self.font_base_bold = ctk.CTkFont(family=family, size=12, weight="bold")
+        self.font_small = ctk.CTkFont(family=family, size=11)
+        self.font_small_bold = ctk.CTkFont(family=family, size=11, weight="bold")
+        self.font_title = ctk.CTkFont(family=family, size=13, weight="bold")
+        self.font_icon = ctk.CTkFont(family=family, size=14, weight="bold")
+
+        try:
+            self.root.configure(fg_color=self.ui_colors["bg"])
+        except Exception:
+            pass
 
     def _load_config(self) -> dict:
         default = {"root_folder": "", "tree_child_order": {}}
@@ -456,21 +514,35 @@ class PeopleFolderManagerApp:
             self.root_dir_var.set(str(root_path))
 
     def _build_layout(self) -> None:
-        top_frame = ctk.CTkFrame(self.root)
+        top_frame = ctk.CTkFrame(self.root, fg_color=self.ui_colors["panel"])
         top_frame.pack(fill="x", padx=10, pady=(10, 6))
 
-        ctk.CTkLabel(top_frame, text="主資料夾：", font=("Arial", 12, "bold")).pack(side="left", padx=(10, 4))
+        ctk.CTkLabel(top_frame, text="主資料夾：", font=self.font_base_bold, text_color=self.ui_colors["text"]).pack(
+            side="left", padx=(10, 4)
+        )
         self.root_dir_var = ctk.StringVar(value="")
-        self.root_dir_entry = ctk.CTkEntry(top_frame, textvariable=self.root_dir_var, width=620)
+        self.root_dir_entry = ctk.CTkEntry(top_frame, textvariable=self.root_dir_var, width=620, font=self.font_base)
         self.root_dir_entry.pack(side="left", padx=4, pady=8)
-        ctk.CTkButton(top_frame, text="選擇資料夾", width=100, command=self.choose_root_folder).pack(side="left", padx=4)
-        ctk.CTkButton(top_frame, text="刷新", width=70, command=self.refresh_tree).pack(side="left", padx=4)
-        ctk.CTkButton(top_frame, text="匯入 JSON", width=90, command=self.import_tags_json).pack(side="left", padx=(14, 4))
-        ctk.CTkButton(top_frame, text="匯入 CSV", width=90, command=self.import_tags_csv).pack(side="left", padx=4)
-        ctk.CTkButton(top_frame, text="匯出 JSON", width=90, command=self.export_tags_json).pack(side="left", padx=(14, 4))
-        ctk.CTkButton(top_frame, text="匯出 CSV", width=90, command=self.export_tags_csv).pack(side="left", padx=4)
+        ctk.CTkButton(top_frame, text="選擇資料夾", width=100, command=self.choose_root_folder, font=self.font_base).pack(
+            side="left", padx=4
+        )
+        ctk.CTkButton(top_frame, text="刷新", width=70, command=self.refresh_tree, font=self.font_base).pack(
+            side="left", padx=4
+        )
+        ctk.CTkButton(top_frame, text="匯入 JSON", width=90, command=self.import_tags_json, font=self.font_base).pack(
+            side="left", padx=(14, 4)
+        )
+        ctk.CTkButton(top_frame, text="匯入 CSV", width=90, command=self.import_tags_csv, font=self.font_base).pack(
+            side="left", padx=4
+        )
+        ctk.CTkButton(top_frame, text="匯出 JSON", width=90, command=self.export_tags_json, font=self.font_base).pack(
+            side="left", padx=(14, 4)
+        )
+        ctk.CTkButton(top_frame, text="匯出 CSV", width=90, command=self.export_tags_csv, font=self.font_base).pack(
+            side="left", padx=4
+        )
 
-        body = ctk.CTkFrame(self.root)
+        body = ctk.CTkFrame(self.root, fg_color=self.ui_colors["bg"])
         body.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         body.grid_columnconfigure(0, weight=1)
         body.grid_rowconfigure(0, weight=1)
@@ -481,22 +553,25 @@ class PeopleFolderManagerApp:
             sashwidth=5,
             sashrelief=tk.FLAT,
             sashpad=2,
-            bg="#2b2b2b",
+            bg=self.ui_colors["bg"],
             bd=0,
         )
         self.tree_paned.grid(row=0, column=0, sticky="nsew", padx=0, pady=8)
 
-        left_frame = ctk.CTkFrame(self.tree_paned, corner_radius=0)
-        right_frame = ctk.CTkFrame(self.tree_paned, corner_radius=0)
+        left_frame = ctk.CTkFrame(self.tree_paned, corner_radius=10, fg_color=self.ui_colors["panel"])
+        right_frame = ctk.CTkFrame(self.tree_paned, corner_radius=10, fg_color=self.ui_colors["panel"])
         self.tree_paned.add(left_frame, minsize=200, stretch="never")
         self.tree_paned.add(right_frame, minsize=520, stretch="always")
 
-        ctk.CTkLabel(left_frame, text="導覽樹狀欄位（拖曳中間分隔線調整寬度）", font=("Arial", 12, "bold")).pack(
-            anchor="w", padx=10, pady=(10, 6)
-        )
+        ctk.CTkLabel(
+            left_frame,
+            text="導覽樹狀欄位（拖曳中間分隔線調整寬度）",
+            font=self.font_base_bold,
+            text_color=self.ui_colors["text"],
+        ).pack(anchor="w", padx=12, pady=(12, 8))
 
-        tree_host = tk.Frame(left_frame, bg="#2b2b2b")
-        tree_host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        tree_host = tk.Frame(left_frame, bg=self.ui_colors["panel"])
+        tree_host.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         tree_host.grid_rowconfigure(0, weight=1)
         tree_host.grid_columnconfigure(0, weight=1)
         self._tree_host = tree_host
@@ -510,10 +585,36 @@ class PeopleFolderManagerApp:
         self.folder_tree.configure(yscrollcommand=tree_vsb.set, xscrollcommand=tree_hsb.set)
 
         style = ttk.Style()
-        style.theme_use("default")
-        style.configure("Treeview", background="#2b2b2b", foreground="white", fieldbackground="#2b2b2b", borderwidth=0)
-        style.configure("Treeview.Heading", background="#1f1f1f", foreground="white")
-        style.map("Treeview", background=[("selected", "#144870")])
+        try:
+            style.theme_use("clam")
+        except Exception:
+            style.theme_use("default")
+        style.configure(
+            "Treeview",
+            background=self.ui_colors["panel"],
+            foreground=self.ui_colors["text"],
+            fieldbackground=self.ui_colors["panel"],
+            borderwidth=0,
+            rowheight=24,
+            font=(self._platform_font_family(), 11),
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=self.ui_colors["panel2"],
+            foreground=self.ui_colors["text"],
+            borderwidth=0,
+            font=(self._platform_font_family(), 11, "bold"),
+        )
+        style.map("Treeview", background=[("selected", self.ui_colors["accent_soft"])], foreground=[("selected", self.ui_colors["text"])])
+        style.configure(
+            "TScrollbar",
+            troughcolor=self.ui_colors["panel2"],
+            background=self.ui_colors["border"],
+            bordercolor=self.ui_colors["panel2"],
+            lightcolor=self.ui_colors["panel2"],
+            darkcolor=self.ui_colors["panel2"],
+            arrowsize=12,
+        )
 
         self.folder_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.folder_tree.bind("<<TreeviewOpen>>", self.on_tree_open)
@@ -530,17 +631,24 @@ class PeopleFolderManagerApp:
         scope_row = ctk.CTkFrame(right_frame, fg_color="transparent")
         scope_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
         scope_row.grid_columnconfigure(1, weight=1)
-        self.back_up_button = ctk.CTkButton(scope_row, text="← 返回上一層", width=118, command=self.navigate_back_one_level)
+        self.back_up_button = ctk.CTkButton(
+            scope_row, text="← 返回上一層", width=118, command=self.navigate_back_one_level, font=self.font_base
+        )
         self.back_up_button.grid(row=0, column=0, padx=(0, 8), sticky="w")
-        self.scope_label = ctk.CTkLabel(scope_row, text="目前檢視：未選擇", anchor="w", font=("Arial", 12, "bold"))
+        self.scope_label = ctk.CTkLabel(
+            scope_row, text="目前檢視：未選擇", anchor="w", font=self.font_title, text_color=self.ui_colors["text"]
+        )
         self.scope_label.grid(row=0, column=1, sticky="ew")
 
-        filter_frame = ctk.CTkFrame(right_frame)
+        filter_frame = ctk.CTkFrame(right_frame, fg_color=self.ui_colors["panel"])
         filter_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
         self.filter_tags_header_frame = ctk.CTkFrame(filter_frame, fg_color="transparent")
         self.filter_tags_header_frame.pack(fill="x", padx=10, pady=(8, 4))
         ctk.CTkLabel(
-            self.filter_tags_header_frame, text="標籤篩選（勾選即套用 OR）", font=("Arial", 11, "bold")
+            self.filter_tags_header_frame,
+            text="標籤篩選（勾選即套用 OR）",
+            font=self.font_small_bold,
+            text_color=self.ui_colors["text"],
         ).pack(side="left", padx=(0, 6))
         self.filter_tags_toggle_btn = ctk.CTkButton(
             self.filter_tags_header_frame,
@@ -548,13 +656,16 @@ class PeopleFolderManagerApp:
             width=96,
             height=26,
             command=self.on_toggle_filter_tags,
+            font=self.font_small,
         )
         self.filter_tags_toggle_btn.pack(side="right", padx=(8, 0))
-        self.filter_tags_container = ctk.CTkScrollableFrame(filter_frame, height=96)
+        self.filter_tags_container = ctk.CTkScrollableFrame(filter_frame, height=96, fg_color=self.ui_colors["panel2"])
         self.filter_tags_container.pack(fill="x", padx=8, pady=(0, 6), after=self.filter_tags_header_frame)
         self.media_row_filter_frame = ctk.CTkFrame(filter_frame, fg_color="transparent")
         self.media_row_filter_frame.pack(fill="x", padx=10, pady=(0, 8))
-        ctk.CTkLabel(self.media_row_filter_frame, text="媒體類型：", font=("Arial", 11, "bold")).pack(
+        ctk.CTkLabel(
+            self.media_row_filter_frame, text="媒體類型：", font=self.font_small_bold, text_color=self.ui_colors["text"]
+        ).pack(
             side="left", padx=(0, 6)
         )
         ctk.CTkCheckBox(
@@ -563,6 +674,7 @@ class PeopleFolderManagerApp:
             variable=self.filter_media_video_var,
             command=self.on_media_type_filter_changed,
             width=70,
+            font=self.font_small,
         ).pack(side="left", padx=(0, 10))
         ctk.CTkCheckBox(
             self.media_row_filter_frame,
@@ -570,32 +682,44 @@ class PeopleFolderManagerApp:
             variable=self.filter_media_image_var,
             command=self.on_media_type_filter_changed,
             width=70,
+            font=self.font_small,
         ).pack(side="left", padx=(0, 14))
-        ctk.CTkLabel(self.media_row_filter_frame, text="影片長度（分）", font=("Arial", 11, "bold")).pack(
+        ctk.CTkLabel(
+            self.media_row_filter_frame, text="影片長度（分）", font=self.font_small_bold, text_color=self.ui_colors["text"]
+        ).pack(
             side="left", padx=(0, 4)
         )
         self.filter_duration_min_entry = ctk.CTkEntry(
-            self.media_row_filter_frame, textvariable=self.filter_duration_min_var, width=52
+            self.media_row_filter_frame, textvariable=self.filter_duration_min_var, width=52, font=self.font_small
         )
         self.filter_duration_min_entry.pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(self.media_row_filter_frame, text="～", font=("Arial", 11)).pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(self.media_row_filter_frame, text="～", font=self.font_small, text_color=self.ui_colors["muted"]).pack(
+            side="left", padx=(0, 4)
+        )
         self.filter_duration_max_entry = ctk.CTkEntry(
-            self.media_row_filter_frame, textvariable=self.filter_duration_max_var, width=52
+            self.media_row_filter_frame, textvariable=self.filter_duration_max_var, width=52, font=self.font_small
         )
         self.filter_duration_max_entry.pack(side="left", padx=(0, 6))
-        ctk.CTkButton(self.media_row_filter_frame, text="套用", width=56, command=self.on_apply_duration_filter).pack(
+        ctk.CTkButton(
+            self.media_row_filter_frame, text="套用", width=56, command=self.on_apply_duration_filter, font=self.font_small
+        ).pack(
             side="left", padx=(0, 4)
         )
         for w in (self.filter_duration_min_entry, self.filter_duration_max_entry):
             w.bind("<Return>", self._on_duration_filter_return)
 
-        self.thumbnail_scroll = ctk.CTkScrollableFrame(right_frame, label_text="子資料夾縮圖預覽")
+        self.thumbnail_scroll = ctk.CTkScrollableFrame(
+            right_frame, label_text="子資料夾縮圖預覽", fg_color=self.ui_colors["panel2"]
+        )
         self.thumbnail_scroll.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self._ensure_thumbnail_scroll_hook()
+        self._init_preview_sort_menu()
 
-        status_frame = ctk.CTkFrame(self.root)
+        status_frame = ctk.CTkFrame(self.root, fg_color=self.ui_colors["panel"])
         status_frame.pack(fill="x", padx=10, pady=(0, 10))
-        self.status_label = ctk.CTkLabel(status_frame, text="就緒", anchor="w")
+        self.status_label = ctk.CTkLabel(
+            status_frame, text="就緒", anchor="w", font=self.font_small, text_color=self.ui_colors["muted"]
+        )
         self.status_label.pack(side="left", padx=10, pady=6)
 
         self.context_menu = tk.Menu(self.root, tearoff=0)
@@ -612,6 +736,79 @@ class PeopleFolderManagerApp:
         self.context_menu.add_separator()
         self.context_menu.add_command(label="刪除選取的檔案或資料夾…", command=self.delete_selected_preview_items)
         self.context_menu.add_command(label="刪除資料夾", command=self.delete_current_target_folder)
+
+    def _init_preview_sort_menu(self) -> None:
+        if self._preview_sort_menu is not None:
+            return
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="依名稱排序", command=lambda: self.set_preview_sort_mode("name"))
+        menu.add_command(label="依時間排序", command=lambda: self.set_preview_sort_mode("time"))
+        menu.add_command(label="依檔案類型排序", command=lambda: self.set_preview_sort_mode("type"))
+        self._preview_sort_menu = menu
+
+        def on_right_click_preview_bg(event: tk.Event) -> None:
+            if self._preview_sort_menu is None:
+                return
+            try:
+                self._preview_sort_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                try:
+                    self._preview_sort_menu.grab_release()
+                except Exception:
+                    pass
+
+        # Bind to preview background (canvas + scrollable frame). Cards themselves keep their own context menus.
+        self._bind_right_click_menu(self.thumbnail_scroll, on_right_click_preview_bg)
+        try:
+            self._bind_right_click_menu(self.thumbnail_scroll._parent_canvas, on_right_click_preview_bg)
+        except Exception:
+            pass
+
+    def set_preview_sort_mode(self, mode: str) -> None:
+        mode = (mode or "").strip().lower()
+        if mode not in {"name", "time", "type"}:
+            return
+        if self.preview_sort_mode == mode:
+            return
+        self.preview_sort_mode = mode
+        label = {"name": "名稱", "time": "時間", "type": "檔案類型"}.get(mode, mode)
+        self.set_status(f"預覽區排序：{label}")
+        if self.current_view_mode == "media":
+            self._render_media_from_current_items()
+        else:
+            self.render_entries(self.current_entries)
+
+    def _sorted_entries_for_preview(self, entries: list[SubfolderEntry]) -> list[SubfolderEntry]:
+        mode = self.preview_sort_mode
+        if mode == "time":
+            def key(e: SubfolderEntry):
+                try:
+                    return (Path(e.subfolder_path).stat().st_mtime, e.subfolder_name.lower())
+                except Exception:
+                    return (0.0, e.subfolder_name.lower())
+            return sorted(entries, key=key, reverse=True)
+        if mode == "type":
+            def key(e: SubfolderEntry):
+                t = (e.preview_type or "").lower()
+                return (t, e.subfolder_name.lower())
+            return sorted(entries, key=key)
+        return sorted(entries, key=lambda e: e.subfolder_name.lower())
+
+    def _sorted_media_for_preview(self, items: list[MediaItem]) -> list[MediaItem]:
+        mode = self.preview_sort_mode
+        if mode == "time":
+            def key(m: MediaItem):
+                try:
+                    return (Path(m.media_path).stat().st_mtime, m.media_path.name.lower())
+                except Exception:
+                    return (0.0, m.media_path.name.lower())
+            return sorted(items, key=key, reverse=True)
+        if mode == "type":
+            def key(m: MediaItem):
+                ext = Path(m.media_path).suffix.lower()
+                return (m.media_type, ext, m.media_path.name.lower())
+            return sorted(items, key=key)
+        return sorted(items, key=lambda m: m.media_path.name.lower())
 
     def _on_duration_filter_return(self, _event: tk.Event) -> str:
         self.on_apply_duration_filter()
@@ -1946,27 +2143,33 @@ class PeopleFolderManagerApp:
         top.title("新資料夾要建立在哪裡")
         top.transient(self.root)
         top.grab_set()
-        top.configure(bg="#2b2b2b")
-        frm = tk.Frame(top, padx=14, pady=12, bg="#2b2b2b")
+        top.configure(bg=self.ui_colors["bg"])
+        frm = tk.Frame(top, padx=14, pady=12, bg=self.ui_colors["bg"])
         frm.pack(fill="both", expand=True)
         tk.Label(
             frm,
             text="父層資料夾（預設為「轉移來源所在層」的再上一層，可修改或按「瀏覽…」）：",
             anchor="w",
-            bg="#2b2b2b",
-            fg="white",
+            bg=self.ui_colors["bg"],
+            fg=self.ui_colors["text"],
             wraplength=420,
             justify="left",
+            font=(self._platform_font_family(), 11),
         ).pack(fill="x")
         var = tk.StringVar(value=str(suggested))
         ent = tk.Entry(
             frm,
             textvariable=var,
             width=72,
-            bg="#3d3d3d",
-            fg="white",
-            insertbackground="white",
-            selectbackground="#144870",
+            bg=self.ui_colors["panel"],
+            fg=self.ui_colors["text"],
+            insertbackground=self.ui_colors["text"],
+            selectbackground=self.ui_colors["accent_soft"],
+            selectforeground=self.ui_colors["text"],
+            highlightthickness=1,
+            highlightbackground=self.ui_colors["border"],
+            highlightcolor=self.ui_colors["accent"],
+            font=(self._platform_font_family(), 11),
         )
         ent.pack(fill="x", pady=(8, 10))
 
@@ -2000,7 +2203,7 @@ class PeopleFolderManagerApp:
             result["path"] = p
             top.destroy()
 
-        bf = tk.Frame(frm, bg="#2b2b2b")
+        bf = tk.Frame(frm, bg=self.ui_colors["bg"])
         bf.pack(fill="x")
         tk.Button(bf, text="瀏覽…", command=browse).pack(side="left", padx=(0, 8))
         tk.Button(bf, text="確定", command=ok, width=10).pack(side="right", padx=(4, 0))
@@ -2319,6 +2522,15 @@ class PeopleFolderManagerApp:
             return
         canvas = self.thumbnail_scroll._parent_canvas
         scrollbar = self.thumbnail_scroll._scrollbar
+
+        try:
+            scrollbar.configure(
+                fg_color=self.ui_colors["panel2"],
+                button_color=self.ui_colors["border"],
+                button_hover_color="#cbd5e1",
+            )
+        except Exception:
+            pass
 
         def yscroll_cmd(first: str, last: str) -> None:
             scrollbar.set(first, last)
@@ -2725,11 +2937,11 @@ class PeopleFolderManagerApp:
         label = tk.Label(
             win,
             text=text,
-            bg="#2d5f8f",
+            bg=self.ui_colors["accent"],
             fg="white",
             padx=10,
             pady=6,
-            font=("Arial", 11, "bold"),
+            font=(self._platform_font_family(), 11, "bold"),
         )
         label.pack()
         win.geometry(f"+{x_root + 14}+{y_root + 14}")
@@ -2754,7 +2966,9 @@ class PeopleFolderManagerApp:
 
     def _ensure_insert_indicator(self) -> tk.Frame:
         if self._insert_indicator is None or not self._insert_indicator.winfo_exists():
-            self._insert_indicator = tk.Frame(self.thumbnail_scroll, bg="#2ea3ff", width=3, height=12, bd=0, highlightthickness=0)
+            self._insert_indicator = tk.Frame(
+                self.thumbnail_scroll, bg=self.ui_colors["accent"], width=3, height=12, bd=0, highlightthickness=0
+            )
         return self._insert_indicator
 
     def _hide_insert_indicator(self) -> None:
@@ -2821,7 +3035,7 @@ class PeopleFolderManagerApp:
         entry = self.current_subfolder_entry
         if entry is None:
             return
-        display_items = list(self.current_media_items)
+        display_items = self._sorted_media_for_preview(list(self.current_media_items))
         self.clear_thumbnail_cards()
         if not display_items:
             ctk.CTkLabel(self.thumbnail_scroll, text="目前篩選條件下沒有符合的媒體項目").grid(
@@ -2836,12 +3050,42 @@ class PeopleFolderManagerApp:
         self.root.after(16, self._try_fill_thumbnail_viewport)
 
     def _bind_preview_card_drag(self, card: ctk.CTkFrame, item, idx: int, kind: str) -> None:
+        SHIFT_MASK = 0x0001
+
         def key_of() -> str:
             return self._item_key_for_entry(item) if kind == "entry" else self._item_key_for_media(item)
+
+        def selected_paths_for_drag() -> list[str]:
+            if kind == "entry":
+                keys = set(self.selected_entry_keys)
+                if not keys:
+                    return []
+                return sorted(keys)
+            keys = set(self.selected_media_paths)
+            if not keys:
+                return []
+            return sorted(keys)
+
+        def drag_init(event: tk.Event):
+            if not self._dnd_available or DND_FILES is None or COPY is None:
+                return None
+            key = key_of()
+            self._ensure_selected_for_drag(kind, key, idx)
+            paths = selected_paths_for_drag()
+            if not paths:
+                return None
+            data = tuple(paths)
+            return (COPY, DND_FILES, data)
+
+        def drag_end(_event: tk.Event):
+            return None
 
         def on_press(event: tk.Event) -> None:
             key = key_of()
             self._ensure_selected_for_drag(kind, key, idx)
+            if not (event.state & SHIFT_MASK):
+                self._drag_state = None
+                return
             self._drag_state = {
                 "kind": kind,
                 "start_x_root": event.x_root,
@@ -2851,6 +3095,8 @@ class PeopleFolderManagerApp:
             }
 
         def on_motion(event: tk.Event) -> None:
+            if not (event.state & SHIFT_MASK):
+                return
             st = self._drag_state
             if not st or st.get("kind") != kind:
                 return
@@ -2903,6 +3149,13 @@ class PeopleFolderManagerApp:
             w.bind("<ButtonPress-1>", on_press, add="+")
             w.bind("<B1-Motion>", on_motion, add="+")
             w.bind("<ButtonRelease-1>", on_release, add="+")
+            if self._dnd_available:
+                try:
+                    w.drag_source_register(1, DND_FILES)
+                    w.dnd_bind("<<DragInitCmd>>", drag_init)
+                    w.dnd_bind("<<DragEndCmd>>", drag_end)
+                except Exception:
+                    pass
             for ch in w.winfo_children():
                 bind_tree(ch)
 
@@ -2928,6 +3181,7 @@ class PeopleFolderManagerApp:
         self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}")
         self._update_back_buttons_state()
         filtered = self._apply_media_entry_filter(self._apply_tag_filter(entries))
+        filtered = self._sorted_entries_for_preview(list(filtered))
         self.clear_thumbnail_cards()
         if not filtered:
             ctk.CTkLabel(self.thumbnail_scroll, text="沒有可顯示的子資料夾").grid(
@@ -2943,7 +3197,7 @@ class PeopleFolderManagerApp:
         self.root.after(16, self._try_fill_thumbnail_viewport)
 
     def _create_entry_card(self, row: int, col: int, entry: SubfolderEntry):
-        card = ctk.CTkFrame(self.thumbnail_scroll)
+        card = ctk.CTkFrame(self.thumbnail_scroll, fg_color=self.ui_colors["panel"])
         card.grid(row=row, column=col, padx=8, pady=8, sticky="nw")
         card.configure(width=ENTRY_CARD_SIZE[0], height=ENTRY_CARD_SIZE[1])
         card.grid_propagate(False)
@@ -2960,12 +3214,23 @@ class PeopleFolderManagerApp:
         image_label.grid(row=0, column=0, padx=8, pady=(8, 6), sticky="w")
 
         title = entry.subfolder_name if len(entry.subfolder_name) <= 24 else entry.subfolder_name[:24] + "..."
-        ctk.CTkLabel(card, text=title, anchor="w", font=("Arial", 12, "bold"), height=24).grid(row=1, column=0, padx=8, sticky="ew")
+        ctk.CTkLabel(card, text=title, anchor="w", font=self.font_base_bold, height=24, text_color=self.ui_colors["text"]).grid(
+            row=1, column=0, padx=8, sticky="ew"
+        )
         tags_text = ", ".join(self.tag_repo.get_effective_tags(entry.relative_key)) or "（尚未標籤）"
         if len(tags_text) > 30:
             tags_text = tags_text[:30] + "..."
-        ctk.CTkLabel(card, text=f"標籤：{tags_text}", anchor="w", height=16).grid(row=2, column=0, padx=8, pady=(0, 1), sticky="ew")
-        ctk.CTkLabel(card, text=f"媒體數量：{entry.media_count}", anchor="w", height=20).grid(row=3, column=0, padx=8, pady=(0, 8), sticky="ew")
+        ctk.CTkLabel(card, text=f"標籤：{tags_text}", anchor="w", height=16, font=self.font_small, text_color=self.ui_colors["muted"]).grid(
+            row=2, column=0, padx=8, pady=(0, 1), sticky="ew"
+        )
+        ctk.CTkLabel(
+            card,
+            text=f"媒體數量：{entry.media_count}",
+            anchor="w",
+            height=20,
+            font=self.font_small,
+            text_color=self.ui_colors["muted"],
+        ).grid(row=3, column=0, padx=8, pady=(0, 8), sticky="ew")
         return card, image_label
 
     def render_subfolder_media(self, entry: SubfolderEntry) -> None:
@@ -3021,6 +3286,7 @@ class PeopleFolderManagerApp:
         except Exception as exc:
             messagebox.showerror("錯誤", f"載入媒體清單失敗：\n{exc}")
             return
+        display_items = self._sorted_media_for_preview(list(display_items))
         self.current_media_items = display_items
         if not media_items:
             ctk.CTkLabel(self.thumbnail_scroll, text="此子資料夾內沒有圖片或影片").grid(
@@ -3043,7 +3309,7 @@ class PeopleFolderManagerApp:
         self.root.after(16, self._try_fill_thumbnail_viewport)
 
     def _create_media_card(self, row: int, col: int, item: MediaItem):
-        card = ctk.CTkFrame(self.thumbnail_scroll)
+        card = ctk.CTkFrame(self.thumbnail_scroll, fg_color=self.ui_colors["panel"])
         card.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
         card.configure(width=MEDIA_CARD_SIZE[0], height=MEDIA_CARD_SIZE[1])
         card.grid_propagate(False)
@@ -3060,13 +3326,22 @@ class PeopleFolderManagerApp:
         image_label.grid(row=0, column=0, padx=8, pady=(8, 6), sticky="n")
 
         short_name = item.media_path.name if len(item.media_path.name) <= 28 else item.media_path.name[:28] + "..."
-        ctk.CTkLabel(card, text=short_name, anchor="w").grid(row=1, column=0, padx=8, sticky="ew")
-        ctk.CTkLabel(card, text=f"類型：{'圖片' if item.media_type == 'image' else '影片'}", anchor="w", height=20).grid(
-            row=2, column=0, padx=8, pady=(2, 4), sticky="ew"
+        ctk.CTkLabel(card, text=short_name, anchor="w", font=self.font_base_bold, text_color=self.ui_colors["text"]).grid(
+            row=1, column=0, padx=8, sticky="ew"
         )
+        ctk.CTkLabel(
+            card,
+            text=f"類型：{'圖片' if item.media_type == 'image' else '影片'}",
+            anchor="w",
+            height=20,
+            font=self.font_small,
+            text_color=self.ui_colors["muted"],
+        ).grid(row=2, column=0, padx=8, pady=(2, 4), sticky="ew")
         duration_label = None
         if item.media_type == "video":
-            duration_label = ctk.CTkLabel(card, text="長度：讀取中…", anchor="w", height=20)
+            duration_label = ctk.CTkLabel(
+                card, text="長度：讀取中…", anchor="w", height=20, font=self.font_small, text_color=self.ui_colors["muted"]
+            )
             duration_label.grid(row=3, column=0, padx=8, pady=(0, 8), sticky="ew")
         return card, image_label, duration_label
 
@@ -3180,7 +3455,9 @@ class PeopleFolderManagerApp:
 
             var = ctk.BooleanVar(value=tag in self.selected_filter_tags)
             self.filter_vars[tag] = var
-            ctk.CTkCheckBox(cell, text=tag, variable=var, command=self.on_filter_changed, width=100).pack(
+            ctk.CTkCheckBox(
+                cell, text=tag, variable=var, command=self.on_filter_changed, width=100, font=self.font_small
+            ).pack(
                 side="left", padx=(0, 0)
             )
             ctk.CTkButton(
@@ -3188,9 +3465,9 @@ class PeopleFolderManagerApp:
                 text="×",
                 width=24,
                 height=22,
-                fg_color="#6b2a2a",
-                hover_color="#8b3a3a",
-                font=("Arial", 14, "bold"),
+                fg_color="#ef4444",
+                hover_color="#dc2626",
+                font=self.font_icon,
                 command=lambda t=tag: self.on_delete_tag_from_panel(t),
             ).pack(side="left", padx=(16, 2))
 
@@ -3997,7 +4274,7 @@ class MediaBrowserWindow:
 
         self.top = ctk.CTkToplevel(app.root)
         self.top.title("媒體瀏覽")
-        self.top.configure(fg_color="#0d0d0d")
+        self.top.configure(fg_color=app.ui_colors["bg"])
         self.top.protocol("WM_DELETE_WINDOW", self.close)
         self.top.bind("<Escape>", lambda _e: self.close())
         self.top.bind("<Left>", lambda _e: self._prev())
@@ -4008,27 +4285,40 @@ class MediaBrowserWindow:
 
         toolbar = ctk.CTkFrame(self.top, fg_color="transparent")
         toolbar.pack(fill="x", padx=12, pady=(10, 6))
-        self.title_label = ctk.CTkLabel(toolbar, text="", anchor="w", font=("Arial", 13, "bold"))
+        self.title_label = ctk.CTkLabel(
+            toolbar, text="", anchor="w", font=app.font_title, text_color=app.ui_colors["text"]
+        )
         self.title_label.pack(side="left", fill="x", expand=True)
 
         btn_fr = ctk.CTkFrame(toolbar, fg_color="transparent")
         btn_fr.pack(side="right")
-        ctk.CTkButton(btn_fr, text="‹ 上一張", width=88, command=self._prev).pack(side="left", padx=4)
-        ctk.CTkButton(btn_fr, text="下一張 ›", width=88, command=self._next).pack(side="left", padx=4)
-        ctk.CTkButton(btn_fr, text="以程式開啟", width=100, command=self._open_external).pack(side="left", padx=4)
-        ctk.CTkButton(btn_fr, text="關閉", width=72, fg_color="#555555", hover_color="#666666", command=self.close).pack(
+        ctk.CTkButton(btn_fr, text="‹ 上一張", width=88, command=self._prev, font=app.font_small).pack(side="left", padx=4)
+        ctk.CTkButton(btn_fr, text="下一張 ›", width=88, command=self._next, font=app.font_small).pack(side="left", padx=4)
+        ctk.CTkButton(btn_fr, text="以程式開啟", width=100, command=self._open_external, font=app.font_small).pack(
+            side="left", padx=4
+        )
+        ctk.CTkButton(
+            btn_fr,
+            text="關閉",
+            width=72,
+            fg_color=app.ui_colors["border"],
+            hover_color="#cbd5e1",
+            text_color=app.ui_colors["text"],
+            command=self.close,
+            font=app.font_small,
+        ).pack(
             side="left", padx=(12, 0)
         )
 
         self.hint_label = ctk.CTkLabel(
             self.top,
             text="← → 循環切換同清單　Enter 以系統預設程式開啟目前檔案　Esc 關閉",
-            text_color="#888888",
-            font=("Arial", 11),
+            text_color=app.ui_colors["muted"],
+            font=app.font_small,
         )
         self.hint_label.pack(fill="x", padx=12, pady=(0, 6))
 
-        self.canvas = tk.Canvas(self.top, bg="#000000", highlightthickness=0, borderwidth=0)
+        self.canvas = tk.Canvas(self.top, bg=app.ui_colors["panel"], highlightthickness=0, borderwidth=0)
         self.canvas.pack(fill="both", expand=True, padx=8, pady=(0, 10))
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
@@ -4150,8 +4440,8 @@ class MediaBrowserWindow:
             cw // 2,
             ch // 2,
             text="載入中…",
-            fill="#cccccc",
-            font=("Arial", 16),
+            fill=self.app.ui_colors["muted"],
+            font=(self.app._platform_font_family(), 16),
         )
 
         fut = self.app.thumb_executor.submit(self._load_item_pil_worker, item, self.app.thumbnail_service)
