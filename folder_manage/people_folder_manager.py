@@ -445,7 +445,7 @@ class PeopleFolderManagerApp:
         self._tree_drop_child_frame: Optional[tk.Frame] = None
         self._tree_drag_visual_active = False
         self._folder_media_filter_cache: dict[tuple[str, str], bool] = {}
-        self.preview_sort_mode: str = "name"  # name | time | type
+        self.preview_sort_mode: str = "name"  # name | time | type | manual
         self._preview_sort_menu: Optional[tk.Menu] = None
 
         self._init_visual_style()
@@ -744,6 +744,7 @@ class PeopleFolderManagerApp:
         menu.add_command(label="依名稱排序", command=lambda: self.set_preview_sort_mode("name"))
         menu.add_command(label="依時間排序", command=lambda: self.set_preview_sort_mode("time"))
         menu.add_command(label="依檔案類型排序", command=lambda: self.set_preview_sort_mode("type"))
+        menu.add_command(label="依拖動排序", command=lambda: self.set_preview_sort_mode("manual"))
         self._preview_sort_menu = menu
 
         def on_right_click_preview_bg(event: tk.Event) -> None:
@@ -766,49 +767,76 @@ class PeopleFolderManagerApp:
 
     def set_preview_sort_mode(self, mode: str) -> None:
         mode = (mode or "").strip().lower()
-        if mode not in {"name", "time", "type"}:
+        if mode not in {"name", "time", "type", "manual"}:
             return
         if self.preview_sort_mode == mode:
             return
         self.preview_sort_mode = mode
-        label = {"name": "名稱", "time": "時間", "type": "檔案類型"}.get(mode, mode)
+        label = {"name": "名稱", "time": "時間", "type": "檔案類型", "manual": "拖動排序"}.get(mode, mode)
         self.set_status(f"預覽區排序：{label}")
         if self.current_view_mode == "media":
             self._render_media_from_current_items()
         else:
             self.render_entries(self.current_entries)
 
+    @staticmethod
+    def _preview_name_sort_key(name: str) -> tuple[int, tuple[tuple[int, object], ...], str]:
+        """
+        預覽區名稱排序：
+        - 名稱若以數字開頭，優先做「自然排序」（數字用數值比較）
+        - `_` 與 `-` 視為同類分隔符，會一併納入排序（如 1_11, 1_12, 1_13）
+        - 非數字開頭名稱維持字串排序
+        """
+        normalized = (name or "").strip()
+        lower_name = normalized.lower()
+        starts_with_number = 0 if re.match(r"^\d+", normalized) else 1
+
+        # 將 "_"、"-" 視為同類分隔符，避免 1_11 與 1-11 因符號不同影響主排序
+        normalized_for_sort = re.sub(r"[_-]+", ".", lower_name)
+        natural_tokens: list[tuple[int, object]] = []
+        for token in re.findall(r"\d+|[^\d]+", normalized_for_sort):
+            if token.isdigit():
+                natural_tokens.append((0, int(token)))
+            else:
+                natural_tokens.append((1, token))
+
+        return (starts_with_number, tuple(natural_tokens), lower_name)
+
     def _sorted_entries_for_preview(self, entries: list[SubfolderEntry]) -> list[SubfolderEntry]:
         mode = self.preview_sort_mode
+        if mode == "manual":
+            return list(entries)
         if mode == "time":
             def key(e: SubfolderEntry):
                 try:
-                    return (Path(e.subfolder_path).stat().st_mtime, e.subfolder_name.lower())
+                    return (Path(e.subfolder_path).stat().st_mtime, self._preview_name_sort_key(e.subfolder_name))
                 except Exception:
-                    return (0.0, e.subfolder_name.lower())
+                    return (0.0, self._preview_name_sort_key(e.subfolder_name))
             return sorted(entries, key=key, reverse=True)
         if mode == "type":
             def key(e: SubfolderEntry):
                 t = (e.preview_type or "").lower()
-                return (t, e.subfolder_name.lower())
+                return (t, self._preview_name_sort_key(e.subfolder_name))
             return sorted(entries, key=key)
-        return sorted(entries, key=lambda e: e.subfolder_name.lower())
+        return sorted(entries, key=lambda e: self._preview_name_sort_key(e.subfolder_name))
 
     def _sorted_media_for_preview(self, items: list[MediaItem]) -> list[MediaItem]:
         mode = self.preview_sort_mode
+        if mode == "manual":
+            return list(items)
         if mode == "time":
             def key(m: MediaItem):
                 try:
-                    return (Path(m.media_path).stat().st_mtime, m.media_path.name.lower())
+                    return (Path(m.media_path).stat().st_mtime, self._preview_name_sort_key(m.media_path.name))
                 except Exception:
-                    return (0.0, m.media_path.name.lower())
+                    return (0.0, self._preview_name_sort_key(m.media_path.name))
             return sorted(items, key=key, reverse=True)
         if mode == "type":
             def key(m: MediaItem):
                 ext = Path(m.media_path).suffix.lower()
-                return (m.media_type, ext, m.media_path.name.lower())
+                return (m.media_type, ext, self._preview_name_sort_key(m.media_path.name))
             return sorted(items, key=key)
-        return sorted(items, key=lambda m: m.media_path.name.lower())
+        return sorted(items, key=lambda m: self._preview_name_sort_key(m.media_path.name))
 
     def _on_duration_filter_return(self, _event: tk.Event) -> str:
         self.on_apply_duration_filter()
@@ -2598,11 +2626,18 @@ class PeopleFolderManagerApp:
             entry = entries[idx]
             row = idx // ENTRY_COLUMNS
             col = idx % ENTRY_COLUMNS
-            card, image_label = self._create_entry_card(row, col, entry)
+            card, image_label, drag_handle = self._create_entry_card(row, col, entry)
             entry_key = self._item_key_for_entry(entry)
             self._entry_card_widgets[entry_key] = card
             self._bind_preview_card_selection(card, entry, idx, "entry")
-            self._bind_preview_card_drag(card, entry, idx, "entry")
+            self._bind_preview_card_drag(
+                card,
+                entry,
+                idx,
+                "entry",
+                external_drag_widgets=[image_label],
+                internal_drag_widgets=[drag_handle],
+            )
             self._bind_entry_card_double_click(card, entry)
             entry_menu = lambda e, x=entry: self.show_context_menu_for_entry(e, x)
             self._bind_right_click_menu(card, entry_menu)
@@ -2633,11 +2668,18 @@ class PeopleFolderManagerApp:
             item = media_items[idx]
             row = idx // MEDIA_COLUMNS
             col = idx % MEDIA_COLUMNS
-            card, image_label, duration_label = self._create_media_card(row, col, item)
+            card, image_label, duration_label, drag_handle = self._create_media_card(row, col, item)
             media_key = self._item_key_for_media(item)
             self._media_card_widgets[media_key] = card
             self._bind_preview_card_selection(card, item, idx, "media")
-            self._bind_preview_card_drag(card, item, idx, "media")
+            self._bind_preview_card_drag(
+                card,
+                item,
+                idx,
+                "media",
+                external_drag_widgets=[image_label],
+                internal_drag_widgets=[drag_handle],
+            )
             self._bind_media_card_context_menu(card, item)
             self._bind_media_card_double_click_open(card, item)
             fut = self.thumb_executor.submit(
@@ -3049,9 +3091,16 @@ class PeopleFolderManagerApp:
         self._thumb_append_media(self._thumb_paging_state)
         self.root.after(16, self._try_fill_thumbnail_viewport)
 
-    def _bind_preview_card_drag(self, card: ctk.CTkFrame, item, idx: int, kind: str) -> None:
-        SHIFT_MASK = 0x0001
-
+    def _bind_preview_card_drag(
+        self,
+        card: ctk.CTkFrame,
+        item,
+        idx: int,
+        kind: str,
+        *,
+        external_drag_widgets: Optional[list[tk.Misc]] = None,
+        internal_drag_widgets: Optional[list[tk.Misc]] = None,
+    ) -> None:
         def key_of() -> str:
             return self._item_key_for_entry(item) if kind == "entry" else self._item_key_for_media(item)
 
@@ -3083,9 +3132,6 @@ class PeopleFolderManagerApp:
         def on_press(event: tk.Event) -> None:
             key = key_of()
             self._ensure_selected_for_drag(kind, key, idx)
-            if not (event.state & SHIFT_MASK):
-                self._drag_state = None
-                return
             self._drag_state = {
                 "kind": kind,
                 "start_x_root": event.x_root,
@@ -3095,8 +3141,6 @@ class PeopleFolderManagerApp:
             }
 
         def on_motion(event: tk.Event) -> None:
-            if not (event.state & SHIFT_MASK):
-                return
             st = self._drag_state
             if not st or st.get("kind") != kind:
                 return
@@ -3133,8 +3177,10 @@ class PeopleFolderManagerApp:
                 if not selected:
                     return
                 reordered = self._reorder_by_keys(items, keys, selected, int(insert_index))
+                self.preview_sort_mode = "manual"
                 self.current_entries = reordered
                 self.render_entries(self.current_entries)
+                self.set_status("預覽區排序：拖動排序")
             else:
                 st2 = self._thumb_paging_state or {}
                 items = list(st2.get("items", self.current_media_items))
@@ -3142,13 +3188,19 @@ class PeopleFolderManagerApp:
                 selected = set(self.selected_media_paths)
                 if not selected:
                     return
+                self.preview_sort_mode = "manual"
                 self.current_media_items = self._reorder_by_keys(items, keys, selected, int(insert_index))
                 self._render_media_from_current_items()
+                self.set_status("預覽區排序：拖動排序")
 
-        def bind_tree(w: tk.Misc) -> None:
+        def bind_internal_drag(w: tk.Misc) -> None:
             w.bind("<ButtonPress-1>", on_press, add="+")
             w.bind("<B1-Motion>", on_motion, add="+")
             w.bind("<ButtonRelease-1>", on_release, add="+")
+            for ch in w.winfo_children():
+                bind_internal_drag(ch)
+
+        def bind_external_drag(w: tk.Misc) -> None:
             if self._dnd_available:
                 try:
                     w.drag_source_register(1, DND_FILES)
@@ -3157,9 +3209,12 @@ class PeopleFolderManagerApp:
                 except Exception:
                     pass
             for ch in w.winfo_children():
-                bind_tree(ch)
+                bind_external_drag(ch)
 
-        bind_tree(card)
+        for w in internal_drag_widgets or []:
+            bind_internal_drag(w)
+        for w in external_drag_widgets or []:
+            bind_external_drag(w)
 
     def _bind_entry_card_double_click(self, card: ctk.CTkFrame, entry: SubfolderEntry) -> None:
         def on_double(_event: tk.Event, e: SubfolderEntry = entry) -> None:
@@ -3223,15 +3278,28 @@ class PeopleFolderManagerApp:
         ctk.CTkLabel(card, text=f"標籤：{tags_text}", anchor="w", height=16, font=self.font_small, text_color=self.ui_colors["muted"]).grid(
             row=2, column=0, padx=8, pady=(0, 1), sticky="ew"
         )
+        bottom_bar = ctk.CTkFrame(card, fg_color="transparent")
+        bottom_bar.grid(row=3, column=0, padx=8, pady=(0, 8), sticky="ew")
+        bottom_bar.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            card,
+            bottom_bar,
             text=f"媒體數量：{entry.media_count}",
             anchor="w",
             height=20,
             font=self.font_small,
             text_color=self.ui_colors["muted"],
-        ).grid(row=3, column=0, padx=8, pady=(0, 8), sticky="ew")
-        return card, image_label
+        ).grid(row=0, column=0, sticky="ew")
+        drag_handle = ctk.CTkLabel(
+            bottom_bar,
+            text="拖動排序",
+            anchor="e",
+            height=20,
+            font=self.font_small,
+            text_color=self.ui_colors["accent"],
+            cursor="fleur",
+        )
+        drag_handle.grid(row=0, column=1, padx=(8, 0), sticky="e")
+        return card, image_label, drag_handle
 
     def render_subfolder_media(self, entry: SubfolderEntry) -> None:
         try:
@@ -3329,21 +3397,34 @@ class PeopleFolderManagerApp:
         ctk.CTkLabel(card, text=short_name, anchor="w", font=self.font_base_bold, text_color=self.ui_colors["text"]).grid(
             row=1, column=0, padx=8, sticky="ew"
         )
+        meta_bar = ctk.CTkFrame(card, fg_color="transparent")
+        meta_bar.grid(row=2, column=0, padx=8, pady=(2, 4), sticky="ew")
+        meta_bar.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            card,
+            meta_bar,
             text=f"類型：{'圖片' if item.media_type == 'image' else '影片'}",
             anchor="w",
             height=20,
             font=self.font_small,
             text_color=self.ui_colors["muted"],
-        ).grid(row=2, column=0, padx=8, pady=(2, 4), sticky="ew")
+        ).grid(row=0, column=0, sticky="ew")
+        drag_handle = ctk.CTkLabel(
+            meta_bar,
+            text="拖動排序",
+            anchor="e",
+            height=20,
+            font=self.font_small,
+            text_color=self.ui_colors["accent"],
+            cursor="fleur",
+        )
+        drag_handle.grid(row=0, column=1, padx=(8, 0), sticky="e")
         duration_label = None
         if item.media_type == "video":
             duration_label = ctk.CTkLabel(
                 card, text="長度：讀取中…", anchor="w", height=20, font=self.font_small, text_color=self.ui_colors["muted"]
             )
             duration_label.grid(row=3, column=0, padx=8, pady=(0, 8), sticky="ew")
-        return card, image_label, duration_label
+        return card, image_label, duration_label, drag_handle
 
     def _bind_media_card_context_menu(self, card: ctk.CTkFrame, item: MediaItem) -> None:
         def handler(event: tk.Event, m: MediaItem = item) -> None:
