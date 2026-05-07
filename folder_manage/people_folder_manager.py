@@ -48,12 +48,24 @@ MEDIA_CARD_SIZE = (280, 312)
 
 ENTRY_COLUMNS = 5
 MEDIA_COLUMNS = 5
-ENTRY_BATCH_FIRST = 6
-ENTRY_BATCH_SIZE = 12
-MEDIA_BATCH_FIRST = 8
-MEDIA_BATCH_SIZE = 16
+PREVIEW_GRID_GAP = 16
+PREVIEW_LAYOUT_HORIZONTAL_PADDING = 24
+PREVIEW_SCROLLBAR_RESERVED_WIDTH = 18
+ENTRY_BATCH_FIRST = 4
+ENTRY_BATCH_SIZE = 8
+MEDIA_BATCH_FIRST = 6
+MEDIA_BATCH_SIZE = 10
+LARGE_MEDIA_BATCH_SIZE = 4
+LARGE_PREVIEW_ITEM_COUNT = 200
 THUMB_YVIEW_LOAD_THRESHOLD = 0.78
-THUMB_YVIEW_DEBOUNCE_MS = 90
+THUMB_YVIEW_DEBOUNCE_MS = 120
+THUMB_PREFETCH_COOLDOWN_MS = 260
+PREVIEW_LAYOUT_DEBOUNCE_MS = 130
+THUMB_INDEX_FLUSH_INTERVAL_SECONDS = 1.0
+THUMB_INDEX_FLUSH_CHANGE_COUNT = 24
+PREVIEW_DRAG_MOTION_THROTTLE_SECONDS = 1 / 60
+PREVIEW_DRAG_MOTION_MIN_DELTA = 3
+PREVIEW_DRAG_CANDIDATE_Y_MARGIN = 420
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -81,6 +93,9 @@ class ThumbnailService:
         self._video_duration_cache: dict[str, Optional[float]] = {}
         self._video_semaphore = threading.Semaphore(2)
         self._disk_index = self._load_disk_index()
+        self._disk_index_dirty = False
+        self._disk_index_pending_changes = 0
+        self._last_disk_index_save_at = time.monotonic()
 
     def _resolve_ffmpeg_path(self) -> Optional[str]:
         from_system = shutil.which("ffmpeg")
@@ -104,9 +119,39 @@ class ThumbnailService:
             pass
         return {}
 
-    def _save_disk_index(self) -> None:
+    def _save_disk_index(self, *, force: bool = False) -> None:
+        payload = ""
         with self._index_lock:
-            self.index_path.write_text(json.dumps(self._disk_index, ensure_ascii=False), encoding="utf-8")
+            if not force and not self._disk_index_dirty:
+                return
+            payload = json.dumps(self._disk_index, ensure_ascii=False)
+            self._disk_index_dirty = False
+            self._disk_index_pending_changes = 0
+            self._last_disk_index_save_at = time.monotonic()
+        try:
+            self.index_path.write_text(payload, encoding="utf-8")
+        except Exception:
+            with self._index_lock:
+                self._disk_index_dirty = True
+
+    def flush_disk_index(self) -> None:
+        self._save_disk_index(force=True)
+
+    def _remember_disk_index_record(self, cache_key: str, cached_file: Path) -> None:
+        now = time.monotonic()
+        with self._index_lock:
+            self._disk_index[cache_key] = {
+                "cached_file": str(cached_file),
+                "source_mtime": self._extract_source_mtime_from_key(cache_key),
+            }
+            self._disk_index_dirty = True
+            self._disk_index_pending_changes += 1
+            should_flush = (
+                self._disk_index_pending_changes >= THUMB_INDEX_FLUSH_CHANGE_COUNT
+                or now - self._last_disk_index_save_at >= THUMB_INDEX_FLUSH_INTERVAL_SECONDS
+            )
+        if should_flush:
+            self._save_disk_index()
 
     def _remember_memory_cache(self, key: str, image: Image.Image) -> None:
         if key in self._memory_cache:
@@ -134,7 +179,8 @@ class ThumbnailService:
         return 0.0
 
     def _load_from_disk_cache(self, cache_key: str, source_path: Path) -> Optional[Image.Image]:
-        record = self._disk_index.get(cache_key)
+        with self._index_lock:
+            record = self._disk_index.get(cache_key)
         if not isinstance(record, dict):
             return None
         cached_file = Path(record.get("cached_file", ""))
@@ -157,11 +203,7 @@ class ThumbnailService:
         cached_file = self.cache_dir / f"{hashlib.sha256(cache_key.encode('utf-8')).hexdigest()}.jpg"
         try:
             image.save(cached_file, format="JPEG", quality=88)
-            self._disk_index[cache_key] = {
-                "cached_file": str(cached_file),
-                "source_mtime": self._extract_source_mtime_from_key(cache_key),
-            }
-            self._save_disk_index()
+            self._remember_disk_index_record(cache_key, cached_file)
         except Exception:
             return
 
@@ -295,25 +337,30 @@ class ThumbnailService:
         total = h * 3600 + mi * 60 + sec
         return total if total > 0 else None
 
+    def _video_duration_cache_key(self, video_path: Path) -> str:
+        return self._build_file_cache_key(video_path, "video_duration", (0, 0))
+
+    def _remember_video_duration(self, cache_key: str, duration: Optional[float]) -> None:
+        with self._cache_lock:
+            self._video_duration_cache[cache_key] = duration
+            # Keep duration cache bounded to avoid unbounded memory growth.
+            if len(self._video_duration_cache) > self.max_cache_size * 6:
+                stale_key = next(iter(self._video_duration_cache.keys()), None)
+                if stale_key is not None:
+                    self._video_duration_cache.pop(stale_key, None)
+
     def get_video_duration_seconds(self, video_path: Path) -> Optional[float]:
-        cache_key = self._build_file_cache_key(video_path, "video_duration", (0, 0))
+        cache_key = self._video_duration_cache_key(video_path)
         with self._cache_lock:
             if cache_key in self._video_duration_cache:
                 return self._video_duration_cache[cache_key]
 
         d = self._probe_duration_seconds(video_path)
         if d is not None:
-            with self._cache_lock:
-                self._video_duration_cache[cache_key] = d
+            self._remember_video_duration(cache_key, d)
             return d
         d = self._probe_duration_via_ffmpeg_stderr(video_path)
-        with self._cache_lock:
-            self._video_duration_cache[cache_key] = d
-            # Keep duration cache bounded to avoid unbounded memory growth.
-            if len(self._video_duration_cache) > self.max_cache_size * 6:
-                stale_key = next(iter(self._video_duration_cache.keys()), None)
-                if stale_key is not None:
-                    self._video_duration_cache.pop(stale_key, None)
+        self._remember_video_duration(cache_key, d)
         return d
 
     @staticmethod
@@ -328,7 +375,7 @@ class ThumbnailService:
         return f"{m}:{s:02d}"
 
     def _build_video_offsets(self, video_path: Path) -> list[str]:
-        duration = self._probe_duration_seconds(video_path)
+        duration = self.get_video_duration_seconds(video_path)
         if duration is None or duration <= 0:
             return ["00:00:00.300", "00:00:01.000", "00:00:02.000", "00:00:03.500"]
         points = [
@@ -408,6 +455,11 @@ class PeopleFolderManagerApp:
         self._thumb_paging_state: Optional[dict] = None
         self._thumb_scroll_hooked = False
         self._thumb_yview_after_id: Optional[str] = None
+        self._thumb_prefetch_after_id: Optional[str] = None
+        self._last_thumb_prefetch_at = 0.0
+        self._preview_layout_after_id: Optional[str] = None
+        self._preview_resize_hooked = False
+        self._preview_grid_column_count = 0
         self.current_subfolder_entry: Optional[SubfolderEntry] = None
         self.filter_vars: dict[str, ctk.BooleanVar] = {}
         self.selected_filter_tags: set[str] = set()
@@ -713,6 +765,7 @@ class PeopleFolderManagerApp:
         )
         self.thumbnail_scroll.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self._ensure_thumbnail_scroll_hook()
+        self._ensure_preview_resize_hook()
         self._init_preview_sort_menu()
 
         status_frame = ctk.CTkFrame(self.root, fg_color=self.ui_colors["panel"])
@@ -862,6 +915,19 @@ class PeopleFolderManagerApp:
         except Exception:
             pass
 
+    def _get_preview_scroll_position(self) -> float:
+        try:
+            first, _ = self.thumbnail_scroll._parent_canvas.yview()
+            return float(first)
+        except Exception:
+            return 0.0
+
+    def _restore_preview_scroll_position(self, position: float) -> None:
+        try:
+            self.thumbnail_scroll._parent_canvas.yview_moveto(max(0.0, min(1.0, float(position))))
+        except Exception:
+            pass
+
     def _try_sync_tree_selection(self, path_obj: Path) -> None:
         node_id = self.path_node_index.get(self._path_key(path_obj))
         if not node_id:
@@ -889,10 +955,9 @@ class PeopleFolderManagerApp:
             self._begin_load_merged_entries()
             self._update_back_buttons_state()
             return
-        children = self._order_entries_by_saved_tree(parent, self.store.get_subfolder_entries_shallow(parent))
         self.current_scope_path = parent
         self.current_scope_label = parent.name
-        self.render_entries(children)
+        self._render_folder_children_or_media(parent)
         self._update_back_buttons_state()
 
     def _open_entry_from_preview(self, entry: SubfolderEntry) -> None:
@@ -2484,6 +2549,32 @@ class PeopleFolderManagerApp:
             media_count=media_count,
         )
 
+    def _infer_person_name_for_folder(self, folder: Path) -> str:
+        target = Path(folder).resolve()
+        try:
+            root = Path(self.store.root_folder).resolve() if self.store.root_folder else None
+        except Exception:
+            root = None
+        if root is None:
+            return target.name
+        try:
+            rel = target.relative_to(root)
+            if rel.parts:
+                return rel.parts[0]
+        except Exception:
+            pass
+        return target.name
+
+    def _render_folder_children_or_media(self, folder: Path, *, reuse_session: Optional[int] = None) -> None:
+        target = Path(folder).resolve()
+        entries = self._order_entries_by_saved_tree(target, self.store.get_subfolder_entries_shallow(target))
+        if entries:
+            self.render_entries(entries, reuse_session=reuse_session)
+            return
+        person_name = self._infer_person_name_for_folder(target)
+        fallback_entry = self._build_entry_for_folder(target, person_name)
+        self.render_subfolder_media(fallback_entry)
+
     def _entry_for_tree_subfolder(self, payload: dict) -> SubfolderEntry:
         entry = payload.get("entry")
         if isinstance(entry, SubfolderEntry):
@@ -2545,6 +2636,42 @@ class PeopleFolderManagerApp:
                 pass
             self._thumb_yview_after_id = None
 
+    def _cancel_thumb_prefetch(self) -> None:
+        if self._thumb_prefetch_after_id:
+            try:
+                self.root.after_cancel(self._thumb_prefetch_after_id)
+            except Exception:
+                pass
+            self._thumb_prefetch_after_id = None
+
+    def _schedule_thumb_prefetch(self, delay_ms: int = 0) -> None:
+        if self._thumb_prefetch_after_id is not None:
+            return
+        self._thumb_prefetch_after_id = self.root.after(max(0, int(delay_ms)), self._run_thumb_prefetch)
+
+    def _run_thumb_prefetch(self) -> None:
+        self._thumb_prefetch_after_id = None
+        st = self._thumb_paging_state
+        if not st or not self._is_active_session(st["sid"]):
+            return
+        try:
+            _, bottom = self.thumbnail_scroll._parent_canvas.yview()
+        except Exception:
+            return
+        if bottom < THUMB_YVIEW_LOAD_THRESHOLD:
+            return
+        now = time.monotonic()
+        elapsed_ms = (now - self._last_thumb_prefetch_at) * 1000.0
+        if elapsed_ms < THUMB_PREFETCH_COOLDOWN_MS:
+            self._schedule_thumb_prefetch(int(THUMB_PREFETCH_COOLDOWN_MS - elapsed_ms))
+            return
+        self._last_thumb_prefetch_at = now
+        appended = self._thumb_extend_from_scroll()
+        if not appended:
+            return
+        # One scroll event appends at most one batch. With hundreds of images,
+        # chaining batches here quickly creates too many Tk widgets and stalls scrolling.
+
     def _ensure_thumbnail_scroll_hook(self) -> None:
         if self._thumb_scroll_hooked:
             return
@@ -2571,6 +2698,102 @@ class PeopleFolderManagerApp:
         self._cancel_thumb_yview_debounce()
         self._thumb_yview_after_id = self.root.after(THUMB_YVIEW_DEBOUNCE_MS, self._flush_thumb_yview_check)
 
+    def _cancel_preview_layout_debounce(self) -> None:
+        if self._preview_layout_after_id:
+            try:
+                self.root.after_cancel(self._preview_layout_after_id)
+            except Exception:
+                pass
+            self._preview_layout_after_id = None
+
+    def _ensure_preview_resize_hook(self) -> None:
+        if self._preview_resize_hooked:
+            return
+        canvas = self.thumbnail_scroll._parent_canvas
+        canvas.bind("<Configure>", lambda _e: self._schedule_preview_layout_reflow(), add="+")
+        self.thumbnail_scroll.bind("<Configure>", lambda _e: self._schedule_preview_layout_reflow(), add="+")
+        self._preview_resize_hooked = True
+
+    def _schedule_preview_layout_reflow(self) -> None:
+        self._cancel_preview_layout_debounce()
+        self._preview_layout_after_id = self.root.after(PREVIEW_LAYOUT_DEBOUNCE_MS, self._refresh_preview_layout_if_needed)
+
+    def _refresh_preview_layout_if_needed(self) -> None:
+        self._preview_layout_after_id = None
+        st = self._thumb_paging_state
+        if not st:
+            return
+        kind = st.get("kind")
+        if kind not in {"entries", "media"}:
+            return
+        columns = self._calc_preview_columns(kind)
+        old_columns = int(st.get("columns") or 0)
+        if columns == old_columns:
+            return
+        st["columns"] = columns
+        self._configure_preview_grid_columns(kind, columns)
+        self._reflow_preview_cards(kind, columns)
+        self.root.after(16, self._try_fill_thumbnail_viewport)
+
+    def _preview_card_slot_width(self, kind: str) -> int:
+        card_w = ENTRY_CARD_SIZE[0] if kind == "entries" else MEDIA_CARD_SIZE[0]
+        return card_w + PREVIEW_GRID_GAP
+
+    def _preview_viewport_width(self) -> int:
+        widths: list[int] = []
+        for widget in (self.thumbnail_scroll._parent_canvas, self.thumbnail_scroll):
+            try:
+                width = int(widget.winfo_width())
+            except Exception:
+                continue
+            if width > 1:
+                widths.append(width)
+        return min(widths) if widths else 0
+
+    def _calc_preview_columns(self, kind: str) -> int:
+        fallback = ENTRY_COLUMNS if kind == "entries" else MEDIA_COLUMNS
+        viewport_width = self._preview_viewport_width()
+        if viewport_width <= 1:
+            return fallback
+        slot = max(1, self._preview_card_slot_width(kind))
+        usable = max(1, viewport_width - PREVIEW_LAYOUT_HORIZONTAL_PADDING - PREVIEW_SCROLLBAR_RESERVED_WIDTH)
+        return min(fallback, max(1, usable // slot))
+
+    def _reset_preview_grid_columns(self) -> None:
+        for col in range(self._preview_grid_column_count):
+            self.thumbnail_scroll.grid_columnconfigure(col, weight=0, minsize=0)
+        self._preview_grid_column_count = 0
+
+    def _configure_preview_grid_columns(self, kind: str, columns: int) -> None:
+        columns = max(1, int(columns))
+        prior = max(self._preview_grid_column_count, columns)
+        for col in range(prior):
+            self.thumbnail_scroll.grid_columnconfigure(col, weight=0, minsize=0)
+        slot = self._preview_card_slot_width(kind)
+        for col in range(columns):
+            self.thumbnail_scroll.grid_columnconfigure(col, weight=0, minsize=slot)
+        self._preview_grid_column_count = columns
+
+    def _reflow_preview_cards(self, kind: str, columns: int) -> None:
+        columns = max(1, int(columns))
+        st = self._thumb_paging_state or {}
+        if kind == "entries":
+            keys = [self._item_key_for_entry(x) for x in st.get("entries", [])]
+            mapping = self._entry_card_widgets
+        else:
+            keys = [self._item_key_for_media(x) for x in st.get("items", [])]
+            mapping = self._media_card_widgets
+        for idx, key in enumerate(keys):
+            card = mapping.get(key)
+            if card is None or not card.winfo_exists():
+                continue
+            row = idx // columns
+            col = idx % columns
+            try:
+                card.grid_configure(row=row, column=col)
+            except Exception:
+                continue
+
     def _flush_thumb_yview_check(self) -> None:
         self._thumb_yview_after_id = None
         try:
@@ -2579,40 +2802,24 @@ class PeopleFolderManagerApp:
             return
         if bottom < THUMB_YVIEW_LOAD_THRESHOLD:
             return
-        self._thumb_extend_from_scroll()
-        self.root.after(40, self._try_fill_thumbnail_viewport)
+        self._schedule_thumb_prefetch(0)
 
-    def _thumb_extend_from_scroll(self) -> None:
+    def _thumb_extend_from_scroll(self) -> bool:
         st = self._thumb_paging_state
         if not st:
-            return
+            return False
         if not self._is_active_session(st["sid"]):
-            return
+            return False
         if st["kind"] == "entries" and st["next_index"] < len(st["entries"]):
             self._thumb_append_entries(st)
-        elif st["kind"] == "media" and st["next_index"] < len(st["items"]):
+            return True
+        if st["kind"] == "media" and st["next_index"] < len(st["items"]):
             self._thumb_append_media(st)
+            return True
+        return False
 
     def _try_fill_thumbnail_viewport(self) -> None:
-        st = self._thumb_paging_state
-        if not st or not self._is_active_session(st["sid"]):
-            return
-        try:
-            _, bottom = self.thumbnail_scroll._parent_canvas.yview()
-        except Exception:
-            return
-        if bottom < 0.94:
-            return
-        if st["kind"] == "entries":
-            if st["next_index"] >= len(st["entries"]):
-                return
-            self._thumb_append_entries(st)
-            self.root.after(16, self._try_fill_thumbnail_viewport)
-        elif st["kind"] == "media":
-            if st["next_index"] >= len(st["items"]):
-                return
-            self._thumb_append_media(st)
-            self.root.after(16, self._try_fill_thumbnail_viewport)
+        self._schedule_thumb_prefetch(10)
 
     def _thumb_append_entries(self, st: dict) -> None:
         sid = st["sid"]
@@ -2620,12 +2827,15 @@ class PeopleFolderManagerApp:
         start = st["next_index"]
         if not self._is_active_session(sid) or start >= len(entries):
             return
+        columns = int(st.get("columns") or self._calc_preview_columns("entries"))
+        st["columns"] = columns
+        self._configure_preview_grid_columns("entries", columns)
         batch_size = ENTRY_BATCH_FIRST if start == 0 else ENTRY_BATCH_SIZE
         end = min(start + batch_size, len(entries))
         for idx in range(start, end):
             entry = entries[idx]
-            row = idx // ENTRY_COLUMNS
-            col = idx % ENTRY_COLUMNS
+            row = idx // columns
+            col = idx % columns
             card, image_label, drag_handle = self._create_entry_card(row, col, entry)
             entry_key = self._item_key_for_entry(entry)
             self._entry_card_widgets[entry_key] = card
@@ -2662,12 +2872,20 @@ class PeopleFolderManagerApp:
         start = st["next_index"]
         if not self._is_active_session(sid) or start >= len(media_items):
             return
-        batch_size = MEDIA_BATCH_FIRST if start == 0 else MEDIA_BATCH_SIZE
+        columns = int(st.get("columns") or self._calc_preview_columns("media"))
+        st["columns"] = columns
+        self._configure_preview_grid_columns("media", columns)
+        if start == 0:
+            batch_size = MEDIA_BATCH_FIRST
+        elif len(media_items) >= LARGE_PREVIEW_ITEM_COUNT:
+            batch_size = LARGE_MEDIA_BATCH_SIZE
+        else:
+            batch_size = MEDIA_BATCH_SIZE
         end = min(start + batch_size, len(media_items))
         for idx in range(start, end):
             item = media_items[idx]
-            row = idx // MEDIA_COLUMNS
-            col = idx % MEDIA_COLUMNS
+            row = idx // columns
+            col = idx % columns
             card, image_label, duration_label, drag_handle = self._create_media_card(row, col, item)
             media_key = self._item_key_for_media(item)
             self._media_card_widgets[media_key] = card
@@ -2743,7 +2961,16 @@ class PeopleFolderManagerApp:
             return
         self.person_entries.clear()
         self.person_entries.update(per_person)
-        self.render_entries(merged, reuse_session=sid)
+        if merged:
+            self.render_entries(merged, reuse_session=sid)
+            return
+        root_folder = Path(self.store.root_folder).resolve() if self.store.root_folder else None
+        if root_folder is None:
+            self.render_entries(merged, reuse_session=sid)
+            return
+        self.set_status("最上層沒有子資料夾，改為顯示主資料夾媒體")
+        fallback_entry = self._build_entry_for_folder(root_folder, root_folder.name)
+        self.render_subfolder_media(fallback_entry)
 
     def _begin_load_person_entries(self, person_folder: Path) -> None:
         sid = self._new_session()
@@ -2772,7 +2999,12 @@ class PeopleFolderManagerApp:
             return
         entries = self._order_entries_by_saved_tree(person_folder, entries)
         self.person_entries[person_folder.name] = entries
-        self.render_entries(entries, reuse_session=sid)
+        if entries:
+            self.render_entries(entries, reuse_session=sid)
+            return
+        self.set_status("此資料夾沒有子資料夾，改為顯示當前資料夾媒體")
+        fallback_entry = self._build_entry_for_folder(person_folder, person_folder.name)
+        self.render_subfolder_media(fallback_entry)
 
     def on_tree_select(self, _event=None) -> None:
         if self._suppress_tree_select_once:
@@ -2815,7 +3047,14 @@ class PeopleFolderManagerApp:
                     merged: list[SubfolderEntry] = []
                     for p in people:
                         merged.extend(self.person_entries[p.name])
-                    self.render_entries(merged)
+                    if merged:
+                        self.render_entries(merged)
+                    elif self.current_scope_path is not None:
+                        self.set_status("最上層沒有子資料夾，改為顯示主資料夾媒體")
+                        fallback_entry = self._build_entry_for_folder(self.current_scope_path, self.current_scope_path.name)
+                        self.render_subfolder_media(fallback_entry)
+                    else:
+                        self.render_entries(merged)
                 else:
                     self._begin_load_merged_entries()
         elif node_type == "person":
@@ -2824,7 +3063,11 @@ class PeopleFolderManagerApp:
             self.current_scope_path = Path(person_folder).resolve()
             cached = self.person_entries.get(person_folder.name)
             if cached is not None:
-                self.render_entries(cached)
+                if cached:
+                    self.render_entries(cached)
+                else:
+                    fallback_entry = self._build_entry_for_folder(person_folder, person_folder.name)
+                    self.render_subfolder_media(fallback_entry)
             else:
                 self._begin_load_person_entries(person_folder)
         elif node_type == "subfolder":
@@ -2836,6 +3079,7 @@ class PeopleFolderManagerApp:
 
     def clear_thumbnail_cards(self) -> None:
         self._cancel_thumb_yview_debounce()
+        self._cancel_thumb_prefetch()
         self._thumb_paging_state = None
         self._drag_state = None
         self._hide_drag_hint()
@@ -2847,6 +3091,7 @@ class PeopleFolderManagerApp:
         self._selection_anchor_index = None
         for child in self.thumbnail_scroll.winfo_children():
             child.destroy()
+        self._reset_preview_grid_columns()
         self._reset_preview_scroll_top()
 
     @staticmethod
@@ -3021,43 +3266,81 @@ class PeopleFolderManagerApp:
         except Exception:
             pass
 
-    def _preview_cards_in_order(self, kind: str, ordered_keys: list[str]) -> list[ctk.CTkFrame]:
+    def _preview_card_refs_in_order(self, kind: str, ordered_keys: list[str]) -> list[tuple[int, ctk.CTkFrame]]:
         mapping = self._entry_card_widgets if kind == "entry" else self._media_card_widgets
-        out: list[ctk.CTkFrame] = []
-        for key in ordered_keys:
+        out: list[tuple[int, ctk.CTkFrame]] = []
+        for idx, key in enumerate(ordered_keys):
             card = mapping.get(key)
             if card is not None and card.winfo_exists():
-                out.append(card)
+                out.append((idx, card))
         return out
 
-    def _compute_drop_index(self, kind: str, x_root: int, y_root: int, ordered_keys: list[str]) -> int:
-        cards = self._preview_cards_in_order(kind, ordered_keys)
-        if not cards:
+    def _current_preview_loaded_count_for_drag(self, kind: str) -> int:
+        st = self._thumb_paging_state or {}
+        paging_kind = st.get("kind")
+        if kind == "entry" and paging_kind == "entries":
+            return int(st.get("next_index") or 0)
+        if kind == "media" and paging_kind == "media":
+            return int(st.get("next_index") or 0)
+        return 0
+
+    def _refresh_preview_drag_cache_if_needed(self, drag_state: dict, kind: str) -> tuple[list[str], list[tuple[int, ctk.CTkFrame]]]:
+        loaded_count = self._current_preview_loaded_count_for_drag(kind)
+        keys_order = drag_state.get("ordered_keys")
+        card_refs = drag_state.get("card_refs")
+        cached_loaded_count = int(drag_state.get("loaded_count") or -1)
+        if not isinstance(keys_order, list) or not isinstance(card_refs, list) or cached_loaded_count != loaded_count:
+            keys_order = self._selection_keys_order()
+            card_refs = self._preview_card_refs_in_order(kind, keys_order)
+            drag_state["ordered_keys"] = keys_order
+            drag_state["card_refs"] = card_refs
+            drag_state["loaded_count"] = loaded_count
+        return keys_order, card_refs
+
+    def _compute_drop_index(
+        self,
+        kind: str,
+        x_root: int,
+        y_root: int,
+        ordered_keys: list[str],
+        card_refs: Optional[list[tuple[int, ctk.CTkFrame]]] = None,
+    ) -> int:
+        refs = card_refs if card_refs is not None else self._preview_card_refs_in_order(kind, ordered_keys)
+        if not refs:
             return 0
         frame_x = self.thumbnail_scroll.winfo_rootx()
         frame_y = self.thumbnail_scroll.winfo_rooty()
         x = x_root - frame_x
         y = y_root - frame_y
-        centers: list[tuple[float, int, ctk.CTkFrame]] = []
-        for i, c in enumerate(cards):
+        nearby_refs = [
+            (i, c)
+            for i, c in refs
+            if abs((c.winfo_y() + (c.winfo_height() / 2)) - y) <= PREVIEW_DRAG_CANDIDATE_Y_MARGIN
+        ]
+        candidates = nearby_refs or refs
+        nearest: Optional[tuple[float, int, ctk.CTkFrame]] = None
+        for i, c in candidates:
             cx = c.winfo_x() + (c.winfo_width() / 2)
             cy = c.winfo_y() + (c.winfo_height() / 2)
             d = (cx - x) ** 2 + (cy - y) ** 2
-            centers.append((d, i, c))
-        centers.sort(key=lambda t: t[0])
-        _, nearest_index, nearest_card = centers[0]
+            if nearest is None or d < nearest[0]:
+                nearest = (d, i, c)
+        if nearest is None:
+            return 0
+        _, nearest_index, nearest_card = nearest
         before = x < (nearest_card.winfo_x() + nearest_card.winfo_width() / 2)
         insert_index = nearest_index if before else nearest_index + 1
 
         ind = self._ensure_insert_indicator()
-        if insert_index >= len(cards):
-            ref = cards[-1]
-            px = ref.winfo_x() + ref.winfo_width() + 4
+        card_by_index = {i: c for i, c in refs}
+        if insert_index in card_by_index:
+            ref = card_by_index[insert_index]
+            px = max(4, ref.winfo_x() - 4)
             py = ref.winfo_y() + 6
             ph = max(10, ref.winfo_height() - 12)
         else:
-            ref = cards[insert_index]
-            px = max(4, ref.winfo_x() - 4)
+            ref = nearest_card
+            px = ref.winfo_x() + ref.winfo_width() + 4
             py = ref.winfo_y() + 6
             ph = max(10, ref.winfo_height() - 12)
         ind.place(x=px, y=py, width=3, height=ph)
@@ -3072,11 +3355,20 @@ class PeopleFolderManagerApp:
         new_pairs = remain_pairs[:target] + selected_pairs + remain_pairs[target:]
         return [p[0] for p in new_pairs]
 
-    def _render_media_from_current_items(self, reuse_session: Optional[int] = None) -> None:
+    def _render_media_from_current_items(
+        self,
+        reuse_session: Optional[int] = None,
+        *,
+        preserve_scroll: bool = False,
+    ) -> None:
         sid = reuse_session if reuse_session is not None else self._new_session()
         entry = self.current_subfolder_entry
         if entry is None:
             return
+        scroll_position = self._get_preview_scroll_position() if preserve_scroll else 0.0
+        prior_loaded_count = 0
+        if preserve_scroll:
+            prior_loaded_count = int((self._thumb_paging_state or {}).get("next_index") or 0)
         display_items = self._sorted_media_for_preview(list(self.current_media_items))
         self.clear_thumbnail_cards()
         if not display_items:
@@ -3084,11 +3376,23 @@ class PeopleFolderManagerApp:
                 row=0, column=0, padx=16, pady=16, sticky="w"
             )
             return
-        for col in range(MEDIA_COLUMNS):
-            self.thumbnail_scroll.grid_columnconfigure(col, weight=1)
+        media_cols = self._calc_preview_columns("media")
+        self._configure_preview_grid_columns("media", media_cols)
         self._ensure_thumbnail_scroll_hook()
-        self._thumb_paging_state = {"sid": sid, "kind": "media", "items": display_items, "entry": entry, "next_index": 0}
+        self._thumb_paging_state = {
+            "sid": sid,
+            "kind": "media",
+            "items": display_items,
+            "entry": entry,
+            "next_index": 0,
+            "columns": media_cols,
+        }
         self._thumb_append_media(self._thumb_paging_state)
+        if preserve_scroll and prior_loaded_count > 0:
+            target_count = min(prior_loaded_count, len(display_items))
+            while self._thumb_paging_state["next_index"] < target_count:
+                self._thumb_append_media(self._thumb_paging_state)
+            self.root.after(16, lambda pos=scroll_position: self._restore_preview_scroll_position(pos))
         self.root.after(16, self._try_fill_thumbnail_viewport)
 
     def _bind_preview_card_drag(
@@ -3138,6 +3442,11 @@ class PeopleFolderManagerApp:
                 "start_y_root": event.y_root,
                 "dragging": False,
                 "insert_index": None,
+                "last_motion_at": 0.0,
+                "last_motion_xy": (event.x_root, event.y_root),
+                "ordered_keys": None,
+                "card_refs": None,
+                "loaded_count": -1,
             }
 
         def on_motion(event: tk.Event) -> None:
@@ -3152,9 +3461,23 @@ class PeopleFolderManagerApp:
                 st["dragging"] = True
                 count = len(self._preview_selected_keys(kind))
                 self._show_drag_hint(f"移動 {count} 個項目", event.x_root, event.y_root)
+                keys_order = self._selection_keys_order()
+                st["ordered_keys"] = keys_order
+                st["card_refs"] = self._preview_card_refs_in_order(kind, keys_order)
+                st["loaded_count"] = self._current_preview_loaded_count_for_drag(kind)
+
+            now = time.monotonic()
+            last_x, last_y = st.get("last_motion_xy", (st["start_x_root"], st["start_y_root"]))
+            moved = abs(event.x_root - last_x) + abs(event.y_root - last_y)
+            if moved < PREVIEW_DRAG_MOTION_MIN_DELTA:
+                return
+            if now - float(st.get("last_motion_at") or 0.0) < PREVIEW_DRAG_MOTION_THROTTLE_SECONDS:
+                return
+            st["last_motion_at"] = now
+            st["last_motion_xy"] = (event.x_root, event.y_root)
             self._move_drag_hint(event.x_root, event.y_root)
-            keys_order = self._selection_keys_order()
-            st["insert_index"] = self._compute_drop_index(kind, event.x_root, event.y_root, keys_order)
+            keys_order, card_refs = self._refresh_preview_drag_cache_if_needed(st, kind)
+            st["insert_index"] = self._compute_drop_index(kind, event.x_root, event.y_root, keys_order, card_refs)
 
         def on_release(_event: tk.Event) -> None:
             st = self._drag_state
@@ -3179,7 +3502,7 @@ class PeopleFolderManagerApp:
                 reordered = self._reorder_by_keys(items, keys, selected, int(insert_index))
                 self.preview_sort_mode = "manual"
                 self.current_entries = reordered
-                self.render_entries(self.current_entries)
+                self.render_entries(self.current_entries, preserve_scroll=True)
                 self.set_status("預覽區排序：拖動排序")
             else:
                 st2 = self._thumb_paging_state or {}
@@ -3190,7 +3513,7 @@ class PeopleFolderManagerApp:
                     return
                 self.preview_sort_mode = "manual"
                 self.current_media_items = self._reorder_by_keys(items, keys, selected, int(insert_index))
-                self._render_media_from_current_items()
+                self._render_media_from_current_items(preserve_scroll=True)
                 self.set_status("預覽區排序：拖動排序")
 
         def bind_internal_drag(w: tk.Misc) -> None:
@@ -3227,7 +3550,13 @@ class PeopleFolderManagerApp:
 
         bind_tree(card)
 
-    def render_entries(self, entries: list[SubfolderEntry], *, reuse_session: Optional[int] = None) -> None:
+    def render_entries(
+        self,
+        entries: list[SubfolderEntry],
+        *,
+        reuse_session: Optional[int] = None,
+        preserve_scroll: bool = False,
+    ) -> None:
         sid = reuse_session if reuse_session is not None else self._new_session()
         self.current_view_mode = "entries"
         self.current_subfolder_entry = None
@@ -3235,6 +3564,10 @@ class PeopleFolderManagerApp:
         self.current_media_items = []
         self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}")
         self._update_back_buttons_state()
+        scroll_position = self._get_preview_scroll_position() if preserve_scroll else 0.0
+        prior_loaded_count = 0
+        if preserve_scroll:
+            prior_loaded_count = int((self._thumb_paging_state or {}).get("next_index") or 0)
         filtered = self._apply_media_entry_filter(self._apply_tag_filter(entries))
         filtered = self._sorted_entries_for_preview(list(filtered))
         self.clear_thumbnail_cards()
@@ -3244,11 +3577,22 @@ class PeopleFolderManagerApp:
             )
             self.set_status("目前標籤／媒體類型篩選下沒有結果")
             return
-        for col in range(ENTRY_COLUMNS):
-            self.thumbnail_scroll.grid_columnconfigure(col, weight=0, minsize=ENTRY_CARD_SIZE[0] + 16)
+        entry_cols = self._calc_preview_columns("entries")
+        self._configure_preview_grid_columns("entries", entry_cols)
         self._ensure_thumbnail_scroll_hook()
-        self._thumb_paging_state = {"sid": sid, "kind": "entries", "entries": filtered, "next_index": 0}
+        self._thumb_paging_state = {
+            "sid": sid,
+            "kind": "entries",
+            "entries": filtered,
+            "next_index": 0,
+            "columns": entry_cols,
+        }
         self._thumb_append_entries(self._thumb_paging_state)
+        if preserve_scroll and prior_loaded_count > 0:
+            target_count = min(prior_loaded_count, len(filtered))
+            while self._thumb_paging_state["next_index"] < target_count:
+                self._thumb_append_entries(self._thumb_paging_state)
+            self.root.after(16, lambda pos=scroll_position: self._restore_preview_scroll_position(pos))
         self.root.after(16, self._try_fill_thumbnail_viewport)
 
     def _create_entry_card(self, row: int, col: int, entry: SubfolderEntry):
@@ -3312,7 +3656,10 @@ class PeopleFolderManagerApp:
         self.current_view_mode = "media"
         self.current_subfolder_entry = entry
         self.current_entries = [entry]
-        self.current_scope_label = f"{entry.person_name} / {entry.subfolder_name}"
+        if entry.person_name == entry.subfolder_name:
+            self.current_scope_label = entry.person_name
+        else:
+            self.current_scope_label = f"{entry.person_name} / {entry.subfolder_name}"
         self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}（媒體預覽）")
         self._update_back_buttons_state()
         self.clear_thumbnail_cards()
@@ -3368,11 +3715,18 @@ class PeopleFolderManagerApp:
             )
             self.set_status("篩選後沒有可預覽媒體")
             return
-        for col in range(MEDIA_COLUMNS):
-            self.thumbnail_scroll.grid_columnconfigure(col, weight=1)
+        media_cols = self._calc_preview_columns("media")
+        self._configure_preview_grid_columns("media", media_cols)
         self._perf_log("media_items_scan_done", scan_start, extra=f"count={len(display_items)}")
         self._ensure_thumbnail_scroll_hook()
-        self._thumb_paging_state = {"sid": sid, "kind": "media", "items": display_items, "entry": entry, "next_index": 0}
+        self._thumb_paging_state = {
+            "sid": sid,
+            "kind": "media",
+            "items": display_items,
+            "entry": entry,
+            "next_index": 0,
+            "columns": media_cols,
+        }
         self._thumb_append_media(self._thumb_paging_state)
         self.root.after(16, self._try_fill_thumbnail_viewport)
 
@@ -4330,6 +4684,7 @@ class PeopleFolderManagerApp:
             messagebox.showerror("匯出失敗", str(exc))
 
     def on_close(self) -> None:
+        self.thumbnail_service.flush_disk_index()
         self.scan_executor.shutdown(wait=False, cancel_futures=True)
         self.thumb_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
