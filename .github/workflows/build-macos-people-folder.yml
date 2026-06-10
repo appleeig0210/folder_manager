@@ -1,4 +1,4 @@
-name: Build macOS (PeopleFolderManager)
+name: Build macOS (PeopleFolderManager Tauri)
 
 on:
   workflow_dispatch:
@@ -29,31 +29,55 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r folder_manage/requirements.txt pyinstaller
           python -V
           pip -V
-          pip freeze
 
-      - name: Build app
+      - name: Install Node dependencies
         run: |
-          pyinstaller people_folder_manager.spec
+          npm ci
+          npm ci --prefix frontend
 
-      - name: Show dist output
+      - name: Generate icons
         run: |
-          ls -la dist || true
+          npm run icons
+          bash scripts/generate_macos_icons.sh
+
+      - name: Build Python sidecar
+        run: |
+          npm run sidecar:mac
+
+      - name: Build Tauri app
+        run: |
+          npm run tauri:build
+
+      - name: Show bundle output
+        run: |
+          find src-tauri/target/release/bundle -maxdepth 3 -print || true
 
       - name: Package app
         run: |
           ZIP_NAME="PeopleFolderManager-${{ matrix.package_label }}.zip"
-          if [ -d "dist/PeopleFolderManager.app" ]; then
-            ditto -c -k --sequesterRsrc --keepParent "dist/PeopleFolderManager.app" "$ZIP_NAME"
-          elif [ -e "dist/PeopleFolderManager" ]; then
-            ditto -c -k --sequesterRsrc --keepParent "dist/PeopleFolderManager" "$ZIP_NAME"
+          APP_PATH="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -n "$APP_PATH" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_NAME"
           else
-            echo "Build output not found in dist/"
+            echo "Tauri .app output not found"
             exit 1
           fi
 
@@ -61,4 +85,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: PeopleFolderManager-${{ matrix.package_label }}
-          path: PeopleFolderManager-${{ matrix.package_label }}.zip
+          path: |
+            PeopleFolderManager-${{ matrix.package_label }}.zip
+            src-tauri/target/release/bundle/dmg/*.dmg

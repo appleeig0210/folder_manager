@@ -2,3 +2,7 @@ customtkinter
 pillow
 imageio-ffmpeg
 tkinterdnd2
+fastapi
+uvicorn[standard]
+pydantic
+pywebview

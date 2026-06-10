@@ -1,0 +1,22 @@
+{
+  "name": "people-folder-manager",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "dev:api": "cd folder_manage && python -m api.main",
+    "dev:ui": "npm run dev --prefix frontend",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:ui\"",
+    "build:ui": "npm run build --prefix frontend",
+    "icons": "python scripts/generate_app_icons.py",
+    "sidecar:win": "powershell -ExecutionPolicy Bypass -File scripts/build_sidecar.ps1",
+    "sidecar:mac": "bash scripts/build_sidecar_macos.sh",
+    "start": "python scripts/launch_app.py",
+    "start:browser": "python scripts/launch_app.py --browser-only",
+    "tauri:dev": "cd src-tauri && tauri dev",
+    "tauri:build": "cd src-tauri && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
+    "concurrently": "^9.1.2"
+  }
+}

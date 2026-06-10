@@ -71,6 +71,12 @@ ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
 
+def _subprocess_hide_window_kwargs() -> dict:
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 if TkinterDnD is not None:
     class _DnDCTk(ctk.CTk, TkinterDnD.DnDWrapper):
         def __init__(self, *args, **kwargs):
@@ -276,7 +282,13 @@ class ThumbnailService:
                 "2",
                 str(output_file),
             ]
-            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                **_subprocess_hide_window_kwargs(),
+            )
             if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
                 return True
         return False
@@ -301,6 +313,7 @@ class ThumbnailService:
             encoding="utf-8",
             errors="replace",
             check=False,
+            **_subprocess_hide_window_kwargs(),
         )
         if result.returncode != 0:
             return None
@@ -322,6 +335,7 @@ class ThumbnailService:
                 errors="replace",
                 timeout=45,
                 check=False,
+                **_subprocess_hide_window_kwargs(),
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return None
@@ -461,6 +475,7 @@ class PeopleFolderManagerApp:
         self._preview_resize_hooked = False
         self._preview_grid_column_count = 0
         self.current_subfolder_entry: Optional[SubfolderEntry] = None
+        self.current_subfolder_entries: list[SubfolderEntry] = []
         self.filter_vars: dict[str, ctk.BooleanVar] = {}
         self.selected_filter_tags: set[str] = set()
         self.filter_media_video_var = ctk.BooleanVar(value=False)
@@ -487,7 +502,7 @@ class PeopleFolderManagerApp:
         self.profile_enabled = True
         self.selection_debounce_ms = 120
         self._pending_select_after_id: Optional[str] = None
-        self._pending_selected_item: Optional[str] = None
+        self._pending_selected_items: list[str] = []
         self._ui_task_queue: queue.Queue = queue.Queue()
         self._ui_pump_pending = False
         self._tree_drag_source: Optional[str] = None
@@ -617,7 +632,7 @@ class PeopleFolderManagerApp:
 
         ctk.CTkLabel(
             left_frame,
-            text="導覽樹狀欄位（拖曳中間分隔線調整寬度）",
+            text="導覽樹狀欄位（Ctrl／Shift 可多選合併預覽；拖曳中間分隔線調整寬度）",
             font=self.font_base_bold,
             text_color=self.ui_colors["text"],
         ).pack(anchor="w", padx=12, pady=(12, 8))
@@ -628,7 +643,7 @@ class PeopleFolderManagerApp:
         tree_host.grid_columnconfigure(0, weight=1)
         self._tree_host = tree_host
 
-        self.folder_tree = ttk.Treeview(tree_host, show="tree", selectmode="browse")
+        self.folder_tree = ttk.Treeview(tree_host, show="tree", selectmode="extended")
         self.folder_tree.grid(row=0, column=0, sticky="nsew")
         tree_vsb = ttk.Scrollbar(tree_host, orient="vertical", command=self.folder_tree.yview)
         tree_vsb.grid(row=0, column=1, sticky="ns")
@@ -891,6 +906,111 @@ class PeopleFolderManagerApp:
             return sorted(items, key=key)
         return sorted(items, key=lambda m: self._preview_name_sort_key(m.media_path.name))
 
+    def _display_ordered_media_items(self) -> list[MediaItem]:
+        st = self._thumb_paging_state or {}
+        if st.get("kind") == "media":
+            items = st.get("items")
+            if isinstance(items, list) and items:
+                return list(items)
+        return list(self.current_media_items)
+
+    def _display_ordered_entries(self) -> list[SubfolderEntry]:
+        st = self._thumb_paging_state or {}
+        if st.get("kind") == "entries":
+            entries = st.get("entries")
+            if isinstance(entries, list) and entries:
+                return list(entries)
+        return list(self.current_entries)
+
+    @staticmethod
+    def _rename_path_map(plan: list[tuple[Path, Path]]) -> dict[Path, Path]:
+        mapping: dict[Path, Path] = {}
+        for old, new in plan:
+            mapping[Path(old).resolve()] = Path(new).resolve()
+        return mapping
+
+    def _remap_media_items_paths(self, items: list[MediaItem], path_map: dict[Path, Path]) -> list[MediaItem]:
+        remapped: list[MediaItem] = []
+        for item in items:
+            old_key = Path(item.media_path).resolve()
+            new_key = path_map.get(old_key, old_key)
+            if new_key == old_key:
+                remapped.append(item)
+            else:
+                remapped.append(MediaItem(media_path=Path(new_key), media_type=item.media_type))
+        return remapped
+
+    def _remap_subfolder_entries_paths(self, entries: list[SubfolderEntry], path_map: dict[Path, Path]) -> list[SubfolderEntry]:
+        remapped: list[SubfolderEntry] = []
+        for entry in entries:
+            old_key = Path(entry.subfolder_path).resolve()
+            new_key = path_map.get(old_key, old_key)
+            if new_key == old_key:
+                remapped.append(entry)
+            else:
+                remapped.append(self._build_entry_for_folder(new_key, entry.person_name))
+        return remapped
+
+    @staticmethod
+    def _remap_path_key_set(keys: set[str], path_map: dict[Path, Path]) -> set[str]:
+        remapped: set[str] = set()
+        for key in keys:
+            try:
+                old_key = Path(key).resolve()
+            except Exception:
+                remapped.add(key)
+                continue
+            new_key = path_map.get(old_key, old_key)
+            remapped.add(str(new_key))
+        return remapped
+
+    def _refresh_media_preview_after_path_renames(self, plan: list[tuple[Path, Path]]) -> None:
+        if self.current_view_mode != "media" or not self._has_media_scope():
+            return
+        path_map = self._rename_path_map(plan)
+        prior = self._display_ordered_media_items()
+        if not prior:
+            self._refresh_current_media_preview()
+            return
+        self.current_media_items = self._remap_media_items_paths(prior, path_map)
+        self.preview_sort_mode = "manual"
+        self.selected_media_paths = self._remap_path_key_set(self.selected_media_paths, path_map)
+        if self.current_subfolder_entries:
+            self.current_subfolder_entries = self._remap_subfolder_entries_paths(
+                self.current_subfolder_entries, path_map
+            )
+            self.current_entries = list(self.current_subfolder_entries)
+            if len(self.current_subfolder_entries) == 1:
+                self.current_subfolder_entry = self.current_subfolder_entries[0]
+            else:
+                self.current_subfolder_entry = None
+        elif self.current_subfolder_entry is not None:
+            remapped = self._remap_subfolder_entries_paths([self.current_subfolder_entry], path_map)
+            if remapped:
+                self.current_subfolder_entry = remapped[0]
+                self.current_entries = [self.current_subfolder_entry]
+        self._render_media_from_current_items(preserve_scroll=True)
+
+    def _refresh_entries_preview_after_path_renames(
+        self,
+        plan: list[tuple[Path, Path]],
+        *,
+        parent_path: Optional[Path] = None,
+    ) -> None:
+        if self.current_view_mode != "entries":
+            return
+        path_map = self._rename_path_map(plan)
+        prior = self._display_ordered_entries()
+        if not prior:
+            return
+        self.current_entries = self._remap_subfolder_entries_paths(prior, path_map)
+        self.preview_sort_mode = "manual"
+        self.selected_entry_keys = self._remap_path_key_set(self.selected_entry_keys, path_map)
+        if parent_path is not None:
+            self._ensure_tree_child_order_dict()[self._path_key(parent_path)] = [e.subfolder_name for e in self.current_entries]
+            self._save_config()
+        self.render_entries(self.current_entries, preserve_scroll=True)
+
     def _on_duration_filter_return(self, _event: tk.Event) -> str:
         self.on_apply_duration_filter()
         return "break"
@@ -1040,16 +1160,37 @@ class PeopleFolderManagerApp:
         if sys.platform == "darwin":
             widget.bind("<Control-Button-1>", callback)
 
-    def _snapshot_media_view(self) -> Optional[SubfolderEntry]:
-        if self.current_view_mode == "media" and self.current_subfolder_entry is not None:
+    def _primary_media_scope_entry(self) -> Optional[SubfolderEntry]:
+        if self.current_subfolder_entry is not None:
             return self.current_subfolder_entry
+        if self.current_subfolder_entries:
+            return self.current_subfolder_entries[0]
+        return None
+
+    def _has_media_scope(self) -> bool:
+        return self.current_subfolder_entry is not None or bool(self.current_subfolder_entries)
+
+    def _refresh_current_media_preview(self) -> None:
+        if self.current_view_mode != "media":
+            return
+        if self.current_subfolder_entries:
+            self.render_merged_subfolder_media(self.current_subfolder_entries)
+        elif self.current_subfolder_entry is not None:
+            self.render_subfolder_media(self.current_subfolder_entry)
+
+    def _snapshot_media_view(self) -> Optional[SubfolderEntry]:
+        if self.current_view_mode == "media":
+            return self._primary_media_scope_entry()
         return None
 
     def _restore_media_view_if_needed(self, entry: Optional[SubfolderEntry]) -> None:
         if entry is None:
             return
         if not self.selected_filter_tags or self._relative_key_matches_tag_filter(entry.relative_key):
-            self.render_subfolder_media(entry)
+            if self.current_subfolder_entries and len(self.current_subfolder_entries) > 1:
+                self.render_merged_subfolder_media(self.current_subfolder_entries)
+            else:
+                self.render_subfolder_media(entry)
 
     def choose_root_folder(self) -> None:
         selected = filedialog.askdirectory(title="選擇主資料夾")
@@ -1077,6 +1218,7 @@ class PeopleFolderManagerApp:
         self.current_media_items = []
         self.current_view_mode = "entries"
         self.current_subfolder_entry = None
+        self.current_subfolder_entries = []
         self.current_scope_path = None
         self.scope_label.configure(text="目前檢視：未選擇")
         self._update_back_buttons_state()
@@ -1348,7 +1490,7 @@ class PeopleFolderManagerApp:
         self.refresh_tree(restore_state=tree_state)
         selected = self.folder_tree.selection()
         if selected:
-            self._apply_tree_selection_from_item_id(selected[0])
+            self._apply_tree_selection_from_item_ids(list(selected))
         else:
             self.clear_thumbnail_cards()
             self.scope_label.configure(text="目前檢視：未選擇")
@@ -1531,13 +1673,13 @@ class PeopleFolderManagerApp:
             except Exception:
                 continue
 
-        selected_path = None
-        selected = self.folder_tree.selection()
-        if selected:
-            payload = self.tree_metadata.get(selected[0]) or {}
+        selected_paths: list[str] = []
+        for item_id in self.folder_tree.selection():
+            payload = self.tree_metadata.get(item_id) or {}
             path_obj = payload.get("path")
             if path_obj:
-                selected_path = self._path_key(path_obj)
+                selected_paths.append(self._path_key(path_obj))
+        selected_path = selected_paths[0] if selected_paths else None
 
         y_pos = 0.0
         try:
@@ -1548,6 +1690,7 @@ class PeopleFolderManagerApp:
         return {
             "expanded_paths": expanded_paths,
             "selected_path": selected_path,
+            "selected_paths": selected_paths,
             "y_pos": y_pos,
         }
 
@@ -1561,13 +1704,19 @@ class PeopleFolderManagerApp:
             self.folder_tree.item(node_id, open=True)
             self._expand_node(node_id)
 
-        selected_path = state.get("selected_path")
-        if selected_path:
-            node_id = self.path_node_index.get(selected_path)
+        selected_paths = state.get("selected_paths")
+        if not isinstance(selected_paths, list) or not selected_paths:
+            legacy = state.get("selected_path")
+            selected_paths = [legacy] if legacy else []
+        node_ids: list[str] = []
+        for path_key in selected_paths:
+            node_id = self.path_node_index.get(path_key)
             if node_id:
-                self.folder_tree.selection_set(node_id)
-                self.folder_tree.focus(node_id)
-                self.folder_tree.see(node_id)
+                node_ids.append(node_id)
+        if node_ids:
+            self.folder_tree.selection_set(node_ids)
+            self.folder_tree.focus(node_ids[0])
+            self.folder_tree.see(node_ids[0])
 
         y_pos = state.get("y_pos")
         if isinstance(y_pos, (int, float)):
@@ -2029,6 +2178,8 @@ class PeopleFolderManagerApp:
         self._tree_drag_start_xy = None
         if self.selected_filter_tags:
             return
+        if len(self.folder_tree.selection()) > 1:
+            return
         row = self.folder_tree.identify_row(event.y)
         if not row:
             return
@@ -2322,8 +2473,9 @@ class PeopleFolderManagerApp:
             if not selected:
                 messagebox.showinfo("提示", "請先在預覽區選取至少一個檔案。")
                 return
-            if self.current_subfolder_entry is not None:
-                base = Path(self.current_subfolder_entry.subfolder_path).resolve()
+            scope_entry = self._primary_media_scope_entry()
+            if scope_entry is not None:
+                base = Path(scope_entry.subfolder_path).resolve()
             else:
                 base = Path(selected[0].media_path).resolve().parent
             suggested_parent = self._parent_one_level_up_clamped_to_root(base)
@@ -2395,9 +2547,7 @@ class PeopleFolderManagerApp:
                     failed_count += 1
             for p in touched_parents:
                 self.store.invalidate_folder_cache(p)
-            cur = self.current_subfolder_entry
-            if cur is not None and self.current_view_mode == "media":
-                self.render_subfolder_media(cur)
+            self._refresh_current_media_preview()
             self._refresh_tree_after_new_folder_transfer(parent_path, new_folder)
             self.set_status(
                 f"已建立「{new_name}」並移入檔案：成功 {moved_count}，改名 {renamed_count}，失敗 {failed_count}"
@@ -2472,9 +2622,7 @@ class PeopleFolderManagerApp:
                     failed += 1
             for par in parents:
                 self.store.invalidate_folder_cache(par)
-            cur = self.current_subfolder_entry
-            if cur is not None:
-                self.render_subfolder_media(cur)
+            self._refresh_current_media_preview()
             self.set_status(f"已刪除 {deleted} 個檔案" + (f"，{failed} 個失敗" if failed else ""))
             return
 
@@ -3013,23 +3161,54 @@ class PeopleFolderManagerApp:
         selected = self.folder_tree.selection()
         if not selected:
             return
-        self._pending_selected_item = selected[0]
+        self._pending_selected_items = list(selected)
         if self._pending_select_after_id:
             self.root.after_cancel(self._pending_select_after_id)
         self._pending_select_after_id = self.root.after(self.selection_debounce_ms, self._process_tree_selection)
 
     def _process_tree_selection(self) -> None:
         self._pending_select_after_id = None
-        if not self._pending_selected_item:
+        if not self._pending_selected_items:
             return
-        item_id = self._pending_selected_item
-        self._pending_selected_item = None
-        self._apply_tree_selection_from_item_id(item_id)
+        item_ids = list(self._pending_selected_items)
+        self._pending_selected_items = []
+        self._apply_tree_selection_from_item_ids(item_ids)
 
-    def _apply_tree_selection_from_item_id(self, item_id: str) -> None:
+    def _normalize_tree_selection_ids(self, item_ids: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item_id in item_ids:
+            payload = self.tree_metadata.get(item_id) or {}
+            node_type = payload.get("type")
+            if node_type in (None, "stub"):
+                continue
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            cleaned.append(item_id)
+        if not cleaned:
+            return []
+        types = {(self.tree_metadata.get(i) or {}).get("type") for i in cleaned}
+        if "root" in types:
+            for item_id in cleaned:
+                if (self.tree_metadata.get(item_id) or {}).get("type") == "root":
+                    return [item_id]
+        return cleaned
+
+    def _apply_tree_selection_from_item_ids(self, item_ids: list[str]) -> None:
+        item_ids = self._normalize_tree_selection_ids(item_ids)
+        if not item_ids:
+            return
+        if len(item_ids) == 1:
+            self._apply_single_tree_selection(item_ids[0])
+            return
+        self._apply_multi_tree_selection(item_ids)
+
+    def _apply_single_tree_selection(self, item_id: str) -> None:
         payload = self.tree_metadata.get(item_id)
         if not payload:
             return
+        self.current_subfolder_entries = []
 
         node_type = payload.get("type")
         if node_type == "root":
@@ -3076,6 +3255,204 @@ class PeopleFolderManagerApp:
             self.current_scope_path = Path(entry.subfolder_path).resolve()
             self.render_subfolder_media(entry)
         self._update_back_buttons_state()
+
+    def _apply_multi_tree_selection(self, item_ids: list[str]) -> None:
+        payloads = [self.tree_metadata.get(i) or {} for i in item_ids]
+        node_types = {p.get("type") for p in payloads}
+        if len(node_types) != 1:
+            self.set_status("多選請選取相同類型（皆為人物資料夾或皆為子資料夾）")
+            return
+
+        node_type = next(iter(node_types))
+        if node_type == "person":
+            person_folders = [Path(p["path"]).resolve() for p in payloads if p.get("path")]
+            if not person_folders:
+                return
+            labels = [p.name for p in person_folders]
+            if len(labels) <= 2:
+                self.current_scope_label = " + ".join(labels)
+            else:
+                self.current_scope_label = f"{labels[0]} + {labels[1]} 等 {len(labels)} 個人物"
+            self.current_scope_path = person_folders[0].parent
+            self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}（合併子資料夾）")
+            self._begin_load_multi_person_entries(person_folders)
+            self._update_back_buttons_state()
+            return
+
+        if node_type == "subfolder":
+            entries = [self._entry_for_tree_subfolder(p) for p in payloads]
+            short_labels = [f"{e.person_name}/{e.subfolder_name}" for e in entries]
+            if len(short_labels) <= 2:
+                self.current_scope_label = " + ".join(short_labels)
+            else:
+                self.current_scope_label = f"{short_labels[0]} + {short_labels[1]} 等 {len(entries)} 個資料夾"
+            self.current_scope_path = Path(entries[0].subfolder_path).resolve().parent
+            self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}（合併媒體預覽）")
+            self.render_merged_subfolder_media(entries)
+            self._update_back_buttons_state()
+            return
+
+        self.set_status("此節點類型不支援多選合併預覽")
+
+    def _multi_person_entries_worker(self, person_folders: list[Path]) -> list[SubfolderEntry]:
+        merged: list[SubfolderEntry] = []
+        for person_folder in person_folders:
+            entries = self._order_entries_by_saved_tree(
+                person_folder, self.store.get_subfolder_entries_shallow(person_folder)
+            )
+            self.person_entries[person_folder.name] = entries
+            if entries:
+                merged.extend(entries)
+            else:
+                merged.append(self._build_entry_for_folder(person_folder, person_folder.name))
+        return merged
+
+    def _begin_load_multi_person_entries(self, person_folders: list[Path]) -> None:
+        sid = self._new_session()
+        self.current_view_mode = "entries_pending"
+        self.current_subfolder_entry = None
+        self.current_subfolder_entries = []
+        self.current_media_items = []
+        self.current_entries = []
+        self.clear_thumbnail_cards()
+        ctk.CTkLabel(self.thumbnail_scroll, text="載入多個人物的子資料夾清單…", anchor="w").grid(
+            row=0, column=0, padx=12, pady=12, sticky="w"
+        )
+        self.set_status(f"掃描 {len(person_folders)} 個人物資料夾…")
+        fut = self.scan_executor.submit(self._multi_person_entries_worker, list(person_folders))
+        fut.add_done_callback(
+            lambda f, session_id=sid: self._enqueue_ui_task(self._on_multi_person_entries_loaded, session_id, f)
+        )
+
+    def _on_multi_person_entries_loaded(self, sid: int, future) -> None:
+        if not self._is_active_session(sid):
+            return
+        try:
+            merged = future.result()
+        except Exception as exc:
+            messagebox.showerror("錯誤", f"載入合併清單失敗：\n{exc}")
+            return
+        if merged:
+            self.render_entries(merged, reuse_session=sid)
+            self.set_status(f"合併顯示 {len(merged)} 個子資料夾")
+            return
+        ctk.CTkLabel(self.thumbnail_scroll, text="所選人物資料夾皆無可預覽內容").grid(
+            row=0, column=0, padx=16, pady=16, sticky="w"
+        )
+        self.set_status("所選人物資料夾沒有可預覽內容")
+
+    def _scan_multi_media_for_preview_worker(
+        self,
+        folders: list[Path],
+        want_video: bool,
+        want_image: bool,
+        lo_min: Optional[float],
+        hi_min: Optional[float],
+    ) -> tuple[list[MediaItem], list[MediaItem]]:
+        all_raw: list[MediaItem] = []
+        all_typed: list[MediaItem] = []
+        for folder in folders:
+            raw = self.store.list_media_items(folder)
+            typed = self._filter_media_items_by_type_list(raw, want_video, want_image)
+            all_raw.extend(raw)
+            all_typed.extend(typed)
+        if lo_min is None and hi_min is None:
+            return all_raw, all_typed
+        return all_raw, self._filter_items_by_duration_minutes(all_typed, lo_min, hi_min)
+
+    def render_merged_subfolder_media(self, entries: list[SubfolderEntry]) -> None:
+        if not entries:
+            return
+        try:
+            d_lo, d_hi = self._parse_duration_filter_minutes()
+        except ValueError as exc:
+            messagebox.showerror("影片長度篩選", str(exc))
+            self.set_status(str(exc))
+            return
+        sid = self._new_session()
+        self.current_view_mode = "media"
+        self.current_subfolder_entries = list(entries)
+        self.current_subfolder_entry = entries[0] if len(entries) == 1 else None
+        self.current_entries = list(entries)
+        self.clear_thumbnail_cards()
+        self.current_media_items = []
+        ctk.CTkLabel(self.thumbnail_scroll, text="載入中...").grid(
+            row=0, column=0, padx=12, pady=12, sticky="w"
+        )
+        folders = [Path(e.subfolder_path).resolve() for e in entries]
+        self.set_status(f"正在掃描 {len(folders)} 個資料夾的媒體…")
+
+        start = self._perf_start()
+        fut = self.scan_executor.submit(
+            self._scan_multi_media_for_preview_worker,
+            folders,
+            self.filter_media_video_var.get(),
+            self.filter_media_image_var.get(),
+            d_lo,
+            d_hi,
+        )
+        fut.add_done_callback(
+            lambda f, session_id=sid, source_entries=list(entries), s=start: self._enqueue_ui_task(
+                self._on_merged_media_items_loaded, session_id, source_entries, f, s
+            )
+        )
+
+    def _merged_media_scope_matches(self, source_entries: list[SubfolderEntry]) -> bool:
+        if not self.current_subfolder_entries:
+            return False
+        try:
+            cur_paths = {Path(e.subfolder_path).resolve() for e in self.current_subfolder_entries}
+            src_paths = {Path(e.subfolder_path).resolve() for e in source_entries}
+        except Exception:
+            return False
+        return cur_paths == src_paths
+
+    def _on_merged_media_items_loaded(
+        self,
+        sid: int,
+        source_entries: list[SubfolderEntry],
+        future,
+        scan_start: float,
+    ) -> None:
+        if not self._is_active_session(sid):
+            return
+        if not self._merged_media_scope_matches(source_entries):
+            return
+        self.clear_thumbnail_cards()
+        try:
+            media_items, display_items = future.result()
+        except Exception as exc:
+            messagebox.showerror("錯誤", f"載入媒體清單失敗：\n{exc}")
+            return
+        display_items = self._sorted_media_for_preview(list(display_items))
+        self.current_media_items = display_items
+        if not media_items:
+            ctk.CTkLabel(self.thumbnail_scroll, text="所選資料夾內沒有圖片或影片").grid(
+                row=0, column=0, padx=16, pady=16, sticky="w"
+            )
+            self.set_status("所選資料夾內沒有可預覽媒體")
+            return
+        if not display_items:
+            ctk.CTkLabel(self.thumbnail_scroll, text="目前篩選條件下沒有符合的媒體項目").grid(
+                row=0, column=0, padx=16, pady=16, sticky="w"
+            )
+            self.set_status("篩選後沒有可預覽媒體")
+            return
+        media_cols = self._calc_preview_columns("media")
+        self._configure_preview_grid_columns("media", media_cols)
+        self._perf_log("merged_media_items_scan_done", scan_start, extra=f"count={len(display_items)}")
+        self._ensure_thumbnail_scroll_hook()
+        self._thumb_paging_state = {
+            "sid": sid,
+            "kind": "media",
+            "items": display_items,
+            "entry": source_entries[0],
+            "entries": list(source_entries),
+            "next_index": 0,
+            "columns": media_cols,
+        }
+        self._thumb_append_media(self._thumb_paging_state)
+        self.root.after(16, self._try_fill_thumbnail_viewport)
 
     def clear_thumbnail_cards(self) -> None:
         self._cancel_thumb_yview_debounce()
@@ -3362,7 +3739,7 @@ class PeopleFolderManagerApp:
         preserve_scroll: bool = False,
     ) -> None:
         sid = reuse_session if reuse_session is not None else self._new_session()
-        entry = self.current_subfolder_entry
+        entry = self._primary_media_scope_entry()
         if entry is None:
             return
         scroll_position = self._get_preview_scroll_position() if preserve_scroll else 0.0
@@ -3379,11 +3756,13 @@ class PeopleFolderManagerApp:
         media_cols = self._calc_preview_columns("media")
         self._configure_preview_grid_columns("media", media_cols)
         self._ensure_thumbnail_scroll_hook()
+        paging_entries = list(self.current_subfolder_entries) if self.current_subfolder_entries else [entry]
         self._thumb_paging_state = {
             "sid": sid,
             "kind": "media",
             "items": display_items,
             "entry": entry,
+            "entries": paging_entries,
             "next_index": 0,
             "columns": media_cols,
         }
@@ -3560,6 +3939,7 @@ class PeopleFolderManagerApp:
         sid = reuse_session if reuse_session is not None else self._new_session()
         self.current_view_mode = "entries"
         self.current_subfolder_entry = None
+        self.current_subfolder_entries = []
         self.current_entries = list(entries)
         self.current_media_items = []
         self.scope_label.configure(text=f"目前檢視：{self.current_scope_label}")
@@ -3655,6 +4035,7 @@ class PeopleFolderManagerApp:
         sid = self._new_session()
         self.current_view_mode = "media"
         self.current_subfolder_entry = entry
+        self.current_subfolder_entries = []
         self.current_entries = [entry]
         if entry.person_name == entry.subfolder_name:
             self.current_scope_label = entry.person_name
@@ -3724,6 +4105,7 @@ class PeopleFolderManagerApp:
             "kind": "media",
             "items": display_items,
             "entry": entry,
+            "entries": [entry],
             "next_index": 0,
             "columns": media_cols,
         }
@@ -4030,13 +4412,17 @@ class PeopleFolderManagerApp:
         self.context_menu.entryconfig("刪除資料夾", state="normal")
         self.context_menu.post(event.x_root, event.y_root)
 
+    def _context_entry_for_media_item(self, item: MediaItem) -> SubfolderEntry:
+        folder = Path(item.media_path).resolve().parent
+        return self._build_entry_for_folder(folder, self._infer_person_name_for_folder(folder))
+
     def show_context_menu_for_media(self, event, item: MediaItem) -> None:
         media_key = self._item_key_for_media(item)
         if media_key not in self.selected_media_paths:
             self.selected_media_paths = {media_key}
             self.selected_entry_keys.clear()
             self._refresh_preview_selection_styles()
-        self._context_target = self.current_subfolder_entry
+        self._context_target = self._context_entry_for_media_item(item)
         self._context_media_item = item
         self.context_menu.entryconfig("新增資料夾…", state="disabled")
         self.context_menu.entryconfig("添加標籤", state="disabled")
@@ -4242,9 +4628,8 @@ class PeopleFolderManagerApp:
             messagebox.showerror("重新命名失敗", str(exc))
             return
         self.store.invalidate_folder_cache(path.parent)
-        cur = self.current_subfolder_entry
-        if cur is not None and self.current_view_mode == "media":
-            self.render_subfolder_media(cur)
+        if self.current_view_mode == "media" and self._has_media_scope():
+            self._refresh_media_preview_after_path_renames([(path, new_path)])
         self.set_status(f"已重新命名檔案：{path.name} → {new_path.name}")
 
     @staticmethod
@@ -4300,7 +4685,7 @@ class PeopleFolderManagerApp:
             old = old.resolve()
             suffix = "" if is_folder else old.suffix
             while True:
-                candidate = (old.parent / f"{base}_{counter}{suffix}").resolve()
+                candidate = (old.parent / f"{base}-{counter}{suffix}").resolve()
                 occupied_by_other = candidate.exists() and candidate not in selected_set
                 occupied_in_plan = candidate in planned_targets
                 stem = candidate.stem
@@ -4338,7 +4723,8 @@ class PeopleFolderManagerApp:
 
     def rename_and_number_selected(self) -> None:
         if self.current_view_mode == "media":
-            selected = [m for m in self.current_media_items if self._item_key_for_media(m) in self.selected_media_paths]
+            selected_keys = set(self.selected_media_paths)
+            selected = [m for m in self._display_ordered_media_items() if self._item_key_for_media(m) in selected_keys]
             if not selected and self._context_media_item is not None:
                 selected = [self._context_media_item]
             if not selected:
@@ -4378,13 +4764,12 @@ class PeopleFolderManagerApp:
             touched = {Path(x.media_path).resolve().parent for x in selected}
             for p in touched:
                 self.store.invalidate_folder_cache(p)
-            cur = self.current_subfolder_entry
-            if cur is not None and self.current_view_mode == "media":
-                self.render_subfolder_media(cur)
+            self._refresh_media_preview_after_path_renames(plan)
             self.set_status(f"已依排序重新命名 {len(selected)} 個檔案")
             return
 
-        selected_entries = [e for e in self.current_entries if self._item_key_for_entry(e) in self.selected_entry_keys]
+        selected_entry_keys = set(self.selected_entry_keys)
+        selected_entries = [e for e in self._display_ordered_entries() if self._item_key_for_entry(e) in selected_entry_keys]
         if not selected_entries and self._context_target is not None:
             selected_entries = [self._context_target]
         if not selected_entries:
@@ -4431,8 +4816,19 @@ class PeopleFolderManagerApp:
         for old_rel, new_rel in old_new_rel_pairs:
             if old_rel and new_rel:
                 self.tag_repo.rename_relative_path_root(old_rel, new_rel)
+        for old, new in plan:
+            if old != new:
+                self._rewrite_tree_order_after_rename(old, new)
+        parent_path = None
+        if selected_entries:
+            try:
+                parent_path = Path(selected_entries[0].subfolder_path).resolve().parent
+            except Exception:
+                parent_path = None
         self.store.clear_cache()
-        self.refresh_tree(restore_state=self._capture_tree_state())
+        tree_state = self._capture_tree_state()
+        self.refresh_tree(restore_state=tree_state)
+        self._refresh_entries_preview_after_path_renames(plan, parent_path=parent_path)
         self.set_status(f"已依排序重新命名 {len(selected_entries)} 個資料夾")
 
     def transfer_current_target_folder(self) -> None:
@@ -4540,9 +4936,7 @@ class PeopleFolderManagerApp:
             for parent in touched_parents:
                 self.store.invalidate_folder_cache(parent)
             self.store.invalidate_folder_cache(target_folder)
-            cur = self.current_subfolder_entry
-            if cur is not None and self.current_view_mode == "media":
-                self.render_subfolder_media(cur)
+            self._refresh_current_media_preview()
             self.set_status(
                 f"批次轉移完成：移動 {moved_count}，改名 {renamed_count}，略過 {skipped_same_folder}，失敗 {failed_count}"
             )

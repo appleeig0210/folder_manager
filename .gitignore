@@ -1,11 +1,56 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 .venv/
 venv/
 .env
+.env.local
+.env.*.local
+*.spec.bak
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python / PyInstaller build
 dist/
 build/
-*.spec.bak
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.local
+
+# Frontend build
+frontend/dist/
+frontend/dist-ssr/
+
+# Rust / Tauri（編譯產物與 sidecar 二進位，由 npm run sidecar:* 重新產生）
+src-tauri/target/
+src-tauri/bin/
+
+# 執行期 log
+api-server-err.txt
+api-server-out.txt
+*.log
+logs/
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
