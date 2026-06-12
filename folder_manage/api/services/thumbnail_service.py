@@ -48,6 +48,8 @@ class ThumbnailService:
         self._cache_order: list[str] = []
         self._video_duration_cache: dict[str, Optional[float]] = {}
         self._video_semaphore = threading.Semaphore(2)
+        self._proxy_jobs_lock = threading.Lock()
+        self._proxy_jobs: set[str] = set()
         self._disk_index = self._load_disk_index()
         self._disk_index_dirty = False
         self._disk_index_pending_changes = 0
@@ -191,6 +193,116 @@ class ThumbnailService:
 
     def get_media_thumbnail(self, file_path: Path, media_type: str) -> Image.Image:
         return self.get_file_thumbnail(file_path, media_type, MEDIA_THUMBNAIL_SIZE)
+
+    def video_proxy_cache_path(self, video_path: Path) -> Path:
+        video = Path(video_path).resolve()
+        return self.cache_dir / f"{self._hash_path(video)}_proxy_v4.mp4"
+
+    def has_video_proxy(self, video_path: Path) -> bool:
+        target_file = self.video_proxy_cache_path(video_path)
+        return target_file.exists() and target_file.stat().st_size > 0
+
+    def get_video_proxy(self, video_path: Path) -> Path:
+        video = Path(video_path).resolve()
+        if not video.is_file():
+            raise FileNotFoundError("找不到影片檔案")
+        if self.has_video_proxy(video):
+            return self.video_proxy_cache_path(video)
+        raise FileNotFoundError("預覽影片尚未就緒")
+
+    def schedule_video_proxy(self, video_path: Path) -> bool:
+        video = Path(video_path).resolve()
+        if not video.is_file() or not self.ffmpeg_path or self.has_video_proxy(video):
+            return False
+
+        cache_key = str(video)
+        with self._proxy_jobs_lock:
+            if cache_key in self._proxy_jobs:
+                return False
+            self._proxy_jobs.add(cache_key)
+
+        thread = threading.Thread(
+            target=self._build_video_proxy_job,
+            args=(video, cache_key),
+            daemon=True,
+            name=f"video-proxy-{video.stem[:24]}",
+        )
+        thread.start()
+        return True
+
+    def _build_video_proxy_job(self, video: Path, cache_key: str) -> None:
+        try:
+            self._build_video_proxy(video)
+        finally:
+            with self._proxy_jobs_lock:
+                self._proxy_jobs.discard(cache_key)
+
+    def _build_video_proxy(self, video_path: Path) -> Path:
+        video = Path(video_path).resolve()
+        if not video.is_file():
+            raise FileNotFoundError("找不到影片檔案")
+        if not self.ffmpeg_path:
+            raise RuntimeError("找不到 ffmpeg，無法產生預覽影片")
+
+        target_file = self.video_proxy_cache_path(video)
+        if target_file.exists() and target_file.stat().st_size > 0:
+            return target_file
+
+        with self._video_semaphore:
+            if target_file.exists() and target_file.stat().st_size > 0:
+                return target_file
+            temp_file = target_file.with_suffix(".tmp.mp4")
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception:
+                    pass
+
+            command = [
+                self.ffmpeg_path,
+                "-y",
+                "-i",
+                str(video),
+                "-map",
+                "0:v:0",
+                "-an",
+                "-vf",
+                "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "32",
+                "-g",
+                "3",
+                "-keyint_min",
+                "3",
+                "-sc_threshold",
+                "0",
+                "-bf",
+                "0",
+                "-refs",
+                "1",
+                "-tune",
+                "fastdecode",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(temp_file),
+            ]
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                **_subprocess_hide_window_kwargs(),
+            )
+            if result.returncode != 0 or not temp_file.exists() or temp_file.stat().st_size == 0:
+                raise RuntimeError("預覽影片產生失敗")
+            temp_file.replace(target_file)
+        return target_file
 
     def extract_video_frame_png(self, video_path: Path, output_file: Path, timestamp_seconds: float) -> Path:
         video = Path(video_path).resolve()

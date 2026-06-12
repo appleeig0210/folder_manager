@@ -76,38 +76,5 @@ def run():
     uvicorn.run(app, host="127.0.0.1", port=8765, reload=False)
 
 
-def verify_ffmpeg() -> int:
-    import subprocess
-
-    from api.constants import APP_NAME
-    from api.services.thumbnail_service import ThumbnailService
-
-    service = ThumbnailService(APP_NAME)
-    ffmpeg_path = service.ffmpeg_path
-    if not ffmpeg_path:
-        print("ffmpeg not found in sidecar bundle", file=sys.stderr)
-        return 1
-
-    result = subprocess.run(
-        [ffmpeg_path, "-version"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    if result.returncode != 0:
-        print(f"ffmpeg failed to run: {ffmpeg_path}", file=sys.stderr)
-        return 1
-
-    version_line = (result.stdout or result.stderr or "").splitlines()[0:1]
-    print(f"ffmpeg ok: {ffmpeg_path}")
-    if version_line:
-        print(version_line[0])
-    return 0
-
-
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--verify-ffmpeg":
-        raise SystemExit(verify_ffmpeg())
     run()

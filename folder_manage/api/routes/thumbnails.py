@@ -79,3 +79,48 @@ def get_media_file(
         media_type=media_type,
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@router.get("/video-proxy/ready")
+def video_proxy_ready(
+    path: str | None = Query(default=None),
+    token: str | None = Query(default=None),
+) -> dict[str, bool]:
+    ctx = get_ctx()
+    file_path = _decode_path_param(path, token)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="檔案不存在")
+    return {"ready": ctx.thumbnail_service.has_video_proxy(file_path)}
+
+
+@router.post("/video-proxy/prepare")
+def prepare_video_proxy(
+    path: str | None = Query(default=None),
+    token: str | None = Query(default=None),
+) -> dict[str, bool]:
+    ctx = get_ctx()
+    file_path = _decode_path_param(path, token)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="檔案不存在")
+    queued = ctx.thumbnail_service.schedule_video_proxy(file_path)
+    return {"queued": queued}
+
+
+@router.get("/video-proxy")
+def get_video_proxy(
+    path: str | None = Query(default=None),
+    token: str | None = Query(default=None),
+) -> FileResponse:
+    ctx = get_ctx()
+    file_path = _decode_path_param(path, token)
+    try:
+        proxy_path = ctx.thumbnail_service.get_video_proxy(file_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return FileResponse(
+        proxy_path,
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
