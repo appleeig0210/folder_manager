@@ -13,7 +13,7 @@
     "start": "python scripts/launch_app.py",
     "start:browser": "python scripts/launch_app.py --browser-only",
     "tauri:dev": "cd src-tauri && tauri dev",
-    "tauri:build": "npm run sidecar:win && cd src-tauri && tauri build"
+    "tauri:build": "cd src-tauri && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.2",
