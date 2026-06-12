@@ -16,11 +16,13 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.deps import get_ctx
+from api.net_compat import ClientDisconnectMiddleware, install_client_disconnect_handling
 from api.routes import config, files, preview, tags, thumbnails, tree
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    install_client_disconnect_handling()
     get_ctx()
     yield
     get_ctx().shutdown()
@@ -35,6 +37,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(ClientDisconnectMiddleware)
 
 app.include_router(config.router)
 app.include_router(tree.router)

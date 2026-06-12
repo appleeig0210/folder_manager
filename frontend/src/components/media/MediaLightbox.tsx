@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { ChevronLeft, ChevronRight, ExternalLink, X } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
 import { Button } from '../ui/Button'
@@ -622,25 +622,29 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
         </div>
 
         {item.media_type === 'video' && !loadError && (
-          <div className="px-6 pb-3 text-white">
-            <div className="mx-auto flex max-w-4xl flex-col gap-3 rounded-[var(--radius-md)] border border-white/10 bg-white/5 px-4 py-3">
+          <div className="px-6 pb-2 text-white">
+            <div className="mx-auto flex max-w-4xl flex-col gap-2 rounded-[var(--radius-md)] border border-white/10 bg-white/5 px-4 py-2">
               <div className="flex items-center justify-between gap-3 text-xs text-white/65">
                 <span>目前 {formatTimestampFine(displayedTime)}</span>
                 <span>{videoDuration > 0 ? `總長 ${formatTimestamp(videoDuration)}` : '讀取時間中…'}</span>
               </div>
               {videoDuration > 0 && (
-                <div className="flex flex-col gap-1">
-                  <span className="text-[11px] text-white/45">全片時間軸（快速定位 · 連續拖拉）</span>
-                  <div className="relative py-1.5">
-                    <div
-                      className="pointer-events-none absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-white/12"
-                      aria-hidden
-                    >
+                <div className="flex items-center gap-3">
+                  <span className="w-[7.5rem] shrink-0 text-[11px] leading-snug text-white/45">
+                    全片時間軸（快速定位 · 連續拖拉）
+                  </span>
+                  <div className="video-scrub-range-wrap min-w-0 flex-1">
+                    <div className="video-scrub-range-track" aria-hidden>
                       <div
-                        className="h-full rounded-full bg-[var(--color-accent)]/80"
+                        className="video-scrub-range-fill video-scrub-range-fill--coarse"
                         style={{ width: `${coarseSeekProgress}%` }}
                       />
                     </div>
+                    <div
+                      className="video-scrub-range-thumb"
+                      style={{ '--scrub-progress': coarseSeekProgress / 100 } as CSSProperties}
+                      aria-hidden
+                    />
                     <input
                       type="range"
                       min={0}
@@ -663,17 +667,17 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                       }}
                       onInput={(event) => previewCoarseSeek(Number(event.currentTarget.value))}
                       onChange={(event) => previewCoarseSeek(Number(event.currentTarget.value))}
-                      className="relative z-[1] w-full accent-[var(--color-accent)]"
+                      className="video-scrub-range w-full"
                       aria-label="全片時間軸"
                     />
                   </div>
                 </div>
               )}
-              <div className="flex flex-col gap-1">
-                <span className="text-[11px] text-white/45">
+              <div className="flex items-center gap-3">
+                <span className="w-[7.5rem] shrink-0 text-[11px] leading-snug text-white/45">
                   精細微調（前後 {FINE_SEEK_WINDOW_SECONDS} 秒 · 毫秒級）
                 </span>
-                <div className="flex items-center gap-2">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
                 <button
                   type="button"
                   onClick={() => seekVideoTo(readVideoTime() - 1)}
@@ -696,16 +700,18 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                 >
                   -1f
                 </button>
-                <div className="relative min-w-0 flex-1 py-1">
-                  <div
-                    className="pointer-events-none absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-white/12"
-                    aria-hidden
-                  >
+                <div className="video-scrub-range-wrap video-scrub-range-wrap--fine min-w-0 flex-1">
+                  <div className="video-scrub-range-track" aria-hidden>
                     <div
-                      className="h-full rounded-full bg-[var(--color-accent)]/75"
+                      className="video-scrub-range-fill video-scrub-range-fill--fine"
                       style={{ width: `${fineSeekProgress}%` }}
                     />
                   </div>
+                  <div
+                    className="video-scrub-range-thumb"
+                    style={{ '--scrub-progress': fineSeekProgress / 100 } as CSSProperties}
+                    aria-hidden
+                  />
                   <input
                     type="range"
                     min={fineSeekStart}
@@ -728,7 +734,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                     }}
                     onInput={(event) => previewFineSeek(Number(event.currentTarget.value))}
                     onChange={(event) => previewFineSeek(Number(event.currentTarget.value))}
-                    className="relative z-[1] w-full accent-[var(--color-accent)]"
+                    className="video-scrub-range video-scrub-range--fine w-full"
                     aria-label="精細調整影片時間"
                   />
                 </div>
@@ -756,9 +762,6 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                 </button>
                 </div>
               </div>
-              <p className="text-center text-[11px] text-white/40">
-                拖拉時約每 {COARSE_SEEK_PREVIEW_MS}ms 更新畫面；放開後精確定位。
-              </p>
             </div>
           </div>
         )}
