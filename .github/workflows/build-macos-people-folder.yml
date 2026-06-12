@@ -68,7 +68,7 @@ jobs:
 
       - name: Build Tauri app
         run: |
-          cd src-tauri && tauri build
+          npm run tauri:bundle
 
       - name: Show bundle output
         run: |

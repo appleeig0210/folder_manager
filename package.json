@@ -14,8 +14,9 @@
     "verify:sidecar-ffmpeg": "bash scripts/verify_sidecar_ffmpeg.sh",
     "start": "python scripts/launch_app.py",
     "start:browser": "python scripts/launch_app.py --browser-only",
-    "tauri:dev": "cd src-tauri && tauri dev",
-    "tauri:build": "npm run sidecar && cd src-tauri && tauri build"
+    "tauri:dev": "cd src-tauri && npx tauri dev",
+    "tauri:bundle": "cd src-tauri && npx tauri build",
+    "tauri:build": "npm run sidecar && npm run tauri:bundle"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.2",
