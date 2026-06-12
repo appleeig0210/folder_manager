@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useRef, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { EntryItem, MediaItem, ViewMode } from '../../api/types'
 import { EntryCard } from './EntryCard'
 import { MediaCard } from './MediaCard'
@@ -7,6 +7,10 @@ import { isTauriRuntime, startNativeFileDrag } from '../../lib/nativeDrag'
 
 const CARD_WIDTH = 220
 const CARD_GAP = 16
+const GRID_ROW_HORIZONTAL_PADDING = 8
+const DROP_INDICATOR_INSET = 4
+const AUTO_SCROLL_EDGE = 72
+const AUTO_SCROLL_MAX_STEP = 18
 const ENTRY_HEIGHT = 324
 const MEDIA_HEIGHT = 304
 
@@ -15,6 +19,7 @@ interface PreviewGridProps {
   entries: EntryItem[]
   media: MediaItem[]
   selectedIds: Set<string>
+  thumbnailVersion?: number
   sortable?: boolean
   onSelect: (id: string, e: React.MouseEvent, index: number) => void
   onDoubleClickEntry: (item: EntryItem) => void
@@ -23,11 +28,28 @@ interface PreviewGridProps {
   onReorder?: (fromId: string, toId: string, position: 'before' | 'after') => void
 }
 
+function getAutoScrollStep(clientY: number, parent: HTMLDivElement) {
+  const rect = parent.getBoundingClientRect()
+  const topDistance = clientY - rect.top
+  const bottomDistance = rect.bottom - clientY
+
+  if (topDistance < AUTO_SCROLL_EDGE) {
+    const intensity = Math.min(1, (AUTO_SCROLL_EDGE - topDistance) / AUTO_SCROLL_EDGE)
+    return -Math.max(1, Math.ceil(intensity * AUTO_SCROLL_MAX_STEP))
+  }
+  if (bottomDistance < AUTO_SCROLL_EDGE) {
+    const intensity = Math.min(1, (AUTO_SCROLL_EDGE - bottomDistance) / AUTO_SCROLL_EDGE)
+    return Math.max(1, Math.ceil(intensity * AUTO_SCROLL_MAX_STEP))
+  }
+  return 0
+}
+
 export function PreviewGrid({
   viewMode,
   entries,
   media,
   selectedIds,
+  thumbnailVersion,
   onSelect,
   onDoubleClickEntry,
   onDoubleClickMedia,
@@ -38,16 +60,87 @@ export function PreviewGrid({
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<{ id: string; position: 'before' | 'after' } | null>(null)
   const [dropIndicator, setDropIndicator] = useState<{ left: number; top: number; height: number } | null>(null)
+  const [containerWidth, setContainerWidth] = useState(0)
   const parentRef = useRef<HTMLDivElement>(null)
+  const autoScrollFrameRef = useRef<number | null>(null)
+  const dragClientYRef = useRef<number | null>(null)
   const items = viewMode === 'entries' ? entries : media
   const rowHeight = viewMode === 'entries' ? ENTRY_HEIGHT : MEDIA_HEIGHT
   const isDraggingSelectedGroup = dragId !== null && selectedIds.has(dragId) && selectedIds.size > 1
   const nativeFileDragEnabled = isTauriRuntime()
 
+  useLayoutEffect(() => {
+    const parent = parentRef.current
+    if (!parent) return
+
+    const updateWidth = (width: number) => {
+      setContainerWidth(Math.max(0, Math.floor(width - GRID_ROW_HORIZONTAL_PADDING)))
+    }
+
+    const parentStyle = window.getComputedStyle(parent)
+    updateWidth(
+      parent.clientWidth - parseFloat(parentStyle.paddingLeft) - parseFloat(parentStyle.paddingRight),
+    )
+
+    const observer = new ResizeObserver(([entry]) => {
+      updateWidth(entry.contentRect.width)
+    })
+    observer.observe(parent)
+
+    return () => observer.disconnect()
+  }, [items.length])
+
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(autoScrollFrameRef.current)
+      autoScrollFrameRef.current = null
+    }
+    dragClientYRef.current = null
+  }, [])
+
+  const runAutoScroll = useCallback(() => {
+    autoScrollFrameRef.current = null
+
+    const parent = parentRef.current
+    const clientY = dragClientYRef.current
+    if (!parent || clientY === null) return
+
+    const step = getAutoScrollStep(clientY, parent)
+    if (step === 0) return
+
+    parent.scrollTop += step
+    autoScrollFrameRef.current = window.requestAnimationFrame(runAutoScroll)
+  }, [])
+
+  const updateAutoScroll = useCallback((clientY: number) => {
+    dragClientYRef.current = clientY
+    if (autoScrollFrameRef.current === null) {
+      autoScrollFrameRef.current = window.requestAnimationFrame(runAutoScroll)
+    }
+  }, [runAutoScroll])
+
+  useEffect(() => {
+    if (!dragId) {
+      stopAutoScroll()
+      return
+    }
+
+    const handleWindowDragOver = (event: DragEvent) => {
+      updateAutoScroll(event.clientY)
+    }
+
+    window.addEventListener('dragover', handleWindowDragOver)
+
+    return () => {
+      window.removeEventListener('dragover', handleWindowDragOver)
+      stopAutoScroll()
+    }
+  }, [dragId, stopAutoScroll, updateAutoScroll])
+
   const columnCount = useMemo(() => {
-    const w = parentRef.current?.clientWidth ?? 800
+    const w = containerWidth || CARD_WIDTH
     return Math.max(1, Math.floor((w + CARD_GAP) / (CARD_WIDTH + CARD_GAP)))
-  }, [items.length, viewMode])
+  }, [containerWidth])
 
   const rowCount = Math.ceil(items.length / columnCount) || 1
 
@@ -70,14 +163,24 @@ export function PreviewGrid({
       setDropIndicator(null)
       return
     }
+    updateAutoScroll(event.clientY)
     const position = getDropPosition(event)
     const rect = event.currentTarget.getBoundingClientRect()
+    const parentRect = parentRef.current?.getBoundingClientRect()
+    const top = parentRect ? Math.max(rect.top + 8, parentRect.top + DROP_INDICATOR_INSET) : rect.top + 8
+    const bottom = parentRect ? Math.min(rect.bottom - 8, parentRect.bottom - DROP_INDICATOR_INSET) : rect.bottom - 8
+    const height = bottom - top
+
     setDropTarget({ id, position })
-    setDropIndicator({
-      left: position === 'before' ? rect.left - CARD_GAP / 2 : rect.right + CARD_GAP / 2,
-      top: rect.top + 8,
-      height: Math.max(24, rect.height - 16),
-    })
+    setDropIndicator(
+      height >= 24
+        ? {
+            left: position === 'before' ? rect.left - CARD_GAP / 2 : rect.right + CARD_GAP / 2,
+            top,
+            height,
+          }
+        : null,
+    )
   }
 
   const commitDrop = (event: React.DragEvent<HTMLElement>, id: string) => {
@@ -88,6 +191,7 @@ export function PreviewGrid({
     setDragId(null)
     setDropTarget(null)
     setDropIndicator(null)
+    stopAutoScroll()
   }
 
   const setDragPreview = (event: React.DragEvent<HTMLElement>, id: string) => {
@@ -139,6 +243,7 @@ export function PreviewGrid({
     setDragId(null)
     setDropTarget(null)
     setDropIndicator(null)
+    stopAutoScroll()
 
     try {
       await startNativeFileDrag(paths)
@@ -159,10 +264,16 @@ export function PreviewGrid({
     <div
       ref={parentRef}
       className="relative flex-1 overflow-y-auto px-5 py-5"
+      onDragOver={(e) => {
+        if (!dragId) return
+        e.preventDefault()
+        updateAutoScroll(e.clientY)
+      }}
       onDragEnd={() => {
         setDragId(null)
         setDropTarget(null)
         setDropIndicator(null)
+        stopAutoScroll()
       }}
     >
       {dropIndicator && (
@@ -186,7 +297,7 @@ export function PreviewGrid({
               style={{
                 top: virtualRow.start,
                 height: virtualRow.size,
-                gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
+                gridTemplateColumns: `repeat(${columnCount}, minmax(${CARD_WIDTH}px, 1fr))`,
               }}
             >
               {rowItems.map((item, colIdx) => {
@@ -198,6 +309,7 @@ export function PreviewGrid({
                       key={entry.id}
                       item={entry}
                       selected={selectedIds.has(entry.id)}
+                      thumbnailVersion={thumbnailVersion}
                       sortable={sortable}
                       dragging={isDraggingSelectedGroup ? selectedIds.has(entry.id) : dragId === entry.id}
                       dropPosition={null}
@@ -209,6 +321,7 @@ export function PreviewGrid({
                       onDragOverItem={(e) => updateDropTarget(e, entry.id)}
                       onDragLeave={() => {
                         setDropTarget((current) => (current?.id === entry.id ? null : current))
+                        setDropIndicator(null)
                       }}
                       onDrop={(e) => commitDrop(e, entry.id)}
                       onSelect={(e) => {
@@ -230,6 +343,7 @@ export function PreviewGrid({
                     key={mediaItem.id}
                     item={mediaItem}
                     selected={selectedIds.has(mediaItem.id)}
+                    thumbnailVersion={thumbnailVersion}
                     sortable={sortable}
                     dragging={isDraggingSelectedGroup ? selectedIds.has(mediaItem.id) : dragId === mediaItem.id}
                     dropPosition={null}
@@ -243,6 +357,7 @@ export function PreviewGrid({
                     onDragOverItem={(e) => updateDropTarget(e, mediaItem.id)}
                     onDragLeave={() => {
                       setDropTarget((current) => (current?.id === mediaItem.id ? null : current))
+                      setDropIndicator(null)
                     }}
                     onDrop={(e) => commitDrop(e, mediaItem.id)}
                     onSelect={(e) => onSelect(mediaItem.id, e, idx)}

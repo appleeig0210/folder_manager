@@ -74,4 +74,6 @@ export interface TagListResponse {
 export interface StatusResponse {
   message: string
   ok: boolean
+  renamed_paths?: string[] | null
+  saved_path?: string | null
 }

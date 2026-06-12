@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, Folder, FolderOpen, User } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { TreeNode } from '../../api/types'
 import { api } from '../../api/client'
 import { cn } from '../../lib/utils'
@@ -15,17 +15,23 @@ function TreeItem({
   node,
   depth,
   selectedPaths,
+  openPaths,
+  childrenByPath,
   onSelect,
+  onToggleOpen,
   onExpandLoaded,
 }: {
   node: TreeNode
   depth: number
   selectedPaths: string[]
-  onSelect: (paths: string[], node: TreeNode) => void
+  openPaths: Set<string>
+  childrenByPath: Record<string, TreeNode[]>
+  onSelect: (node: TreeNode, e: React.MouseEvent) => void
+  onToggleOpen: (node: TreeNode, children: TreeNode[]) => void
   onExpandLoaded?: () => void
 }) {
-  const [open, setOpen] = useState(depth === 0)
-  const [children, setChildren] = useState<TreeNode[]>(node.children)
+  const open = openPaths.has(node.path)
+  const children = childrenByPath[node.path] ?? node.children
   const [loading, setLoading] = useState(false)
   const hasChildren = node.type !== 'stub' && (children.length > 0 || node.type !== 'subfolder' || children.some((c) => c.type === 'stub'))
   const isSelected = selectedPaths.includes(node.path)
@@ -40,29 +46,18 @@ function TreeItem({
       setLoading(true)
       try {
         const loaded = await api.expandNode(node.path)
-        setChildren(loaded)
+        onToggleOpen(node, loaded)
         onExpandLoaded?.()
       } finally {
         setLoading(false)
       }
+      return
     }
-    setOpen(!open)
+    onToggleOpen(node, children)
   }
 
   const handleClick = (e: React.MouseEvent) => {
-    if (e.shiftKey && selectedPaths.length) {
-      onSelect([...new Set([...selectedPaths, node.path])], node)
-      return
-    }
-    if (e.ctrlKey || e.metaKey) {
-      if (isSelected) {
-        onSelect(selectedPaths.filter((p) => p !== node.path), node)
-      } else {
-        onSelect([...selectedPaths, node.path], node)
-      }
-      return
-    }
-    onSelect([node.path], node)
+    onSelect(node, e)
   }
 
   return (
@@ -107,7 +102,10 @@ function TreeItem({
               node={child}
               depth={depth + 1}
               selectedPaths={selectedPaths}
+              openPaths={openPaths}
+              childrenByPath={childrenByPath}
               onSelect={onSelect}
+              onToggleOpen={onToggleOpen}
               onExpandLoaded={onExpandLoaded}
             />
           ))}
@@ -115,7 +113,87 @@ function TreeItem({
   )
 }
 
+function buildInitialChildrenByPath(nodes: TreeNode[]): Record<string, TreeNode[]> {
+  const result: Record<string, TreeNode[]> = {}
+  const visit = (node: TreeNode) => {
+    result[node.path] = node.children
+    node.children.forEach(visit)
+  }
+  nodes.forEach(visit)
+  return result
+}
+
+function flattenVisibleNodes(
+  nodes: TreeNode[],
+  openPaths: Set<string>,
+  childrenByPath: Record<string, TreeNode[]>,
+): TreeNode[] {
+  const result: TreeNode[] = []
+  const visit = (node: TreeNode) => {
+    if (node.type === 'stub') return
+    result.push(node)
+    if (!openPaths.has(node.path)) return
+    const children = childrenByPath[node.path] ?? node.children
+    children.forEach(visit)
+  }
+  nodes.forEach(visit)
+  return result
+}
+
 export function SidebarTree({ nodes, selectedPaths, onSelect, onExpandLoaded }: SidebarTreeProps) {
+  const [anchorPath, setAnchorPath] = useState<string | null>(null)
+  const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set(nodes.filter((node) => node.type === 'root').map((node) => node.path)))
+  const [childrenByPath, setChildrenByPath] = useState<Record<string, TreeNode[]>>(() => buildInitialChildrenByPath(nodes))
+
+  useEffect(() => {
+    setChildrenByPath((current) => ({ ...buildInitialChildrenByPath(nodes), ...current }))
+    setOpenPaths((current) => {
+      const next = new Set(current)
+      nodes.filter((node) => node.type === 'root').forEach((node) => next.add(node.path))
+      return next
+    })
+  }, [nodes])
+
+  const visibleNodes = useMemo(
+    () => flattenVisibleNodes(nodes, openPaths, childrenByPath),
+    [childrenByPath, nodes, openPaths],
+  )
+
+  const handleToggleOpen = (node: TreeNode, children: TreeNode[]) => {
+    setChildrenByPath((current) => ({ ...current, [node.path]: children }))
+    setOpenPaths((current) => {
+      const next = new Set(current)
+      if (next.has(node.path)) next.delete(node.path)
+      else next.add(node.path)
+      return next
+    })
+  }
+
+  const handleSelect = (node: TreeNode, e: React.MouseEvent) => {
+    if (e.shiftKey && anchorPath) {
+      const anchorIndex = visibleNodes.findIndex((candidate) => candidate.path === anchorPath)
+      const currentIndex = visibleNodes.findIndex((candidate) => candidate.path === node.path)
+      if (anchorIndex >= 0 && currentIndex >= 0) {
+        const [lo, hi] = [anchorIndex, currentIndex].sort((a, b) => a - b)
+        onSelect(visibleNodes.slice(lo, hi + 1).map((candidate) => candidate.path), node)
+        return
+      }
+    }
+
+    if (e.ctrlKey || e.metaKey) {
+      setAnchorPath(node.path)
+      if (selectedPaths.includes(node.path)) {
+        onSelect(selectedPaths.filter((p) => p !== node.path), node)
+      } else {
+        onSelect([...selectedPaths, node.path], node)
+      }
+      return
+    }
+
+    setAnchorPath(node.path)
+    onSelect([node.path], node)
+  }
+
   return (
     <div className="flex flex-col gap-0.5 p-2 overflow-y-auto h-full">
       {nodes.map((node) => (
@@ -124,7 +202,10 @@ export function SidebarTree({ nodes, selectedPaths, onSelect, onExpandLoaded }: 
           node={node}
           depth={0}
           selectedPaths={selectedPaths}
-          onSelect={onSelect}
+          openPaths={openPaths}
+          childrenByPath={childrenByPath}
+          onSelect={handleSelect}
+          onToggleOpen={handleToggleOpen}
           onExpandLoaded={onExpandLoaded}
         />
       ))}

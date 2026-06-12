@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -24,8 +25,18 @@ class PreviewService:
         self._folder_media_filter_cache.clear()
 
     @staticmethod
-    def preview_name_sort_key(name: str) -> str:
-        return (name or "").casefold()
+    def preview_name_sort_key(name: str) -> tuple[int, tuple[tuple[int, object], ...], str]:
+        normalized = (name or "").strip()
+        lower_name = normalized.casefold()
+        starts_with_number = 0 if re.match(r"^\d+", normalized) else 1
+        normalized_for_sort = re.sub(r"[_-]+", ".", lower_name)
+        natural_tokens: list[tuple[int, object]] = []
+        for token in re.findall(r"\d+|[^\d]+", normalized_for_sort):
+            if token.isdigit():
+                natural_tokens.append((0, int(token)))
+            else:
+                natural_tokens.append((1, token))
+        return (starts_with_number, tuple(natural_tokens), lower_name)
 
     def sorted_entries(self, entries: list[SubfolderEntry], sort_mode: str) -> list[SubfolderEntry]:
         if sort_mode == "manual":

@@ -192,6 +192,38 @@ class ThumbnailService:
     def get_media_thumbnail(self, file_path: Path, media_type: str) -> Image.Image:
         return self.get_file_thumbnail(file_path, media_type, MEDIA_THUMBNAIL_SIZE)
 
+    def extract_video_frame_png(self, video_path: Path, output_file: Path, timestamp_seconds: float) -> Path:
+        video = Path(video_path).resolve()
+        if not video.is_file():
+            raise FileNotFoundError("找不到影片檔案")
+        if not self.ffmpeg_path:
+            raise RuntimeError("找不到 ffmpeg，無法從原影片擷取畫面")
+
+        output = Path(output_file).resolve()
+        command = [
+            self.ffmpeg_path,
+            "-y",
+            "-ss",
+            self._format_seconds(max(0.0, timestamp_seconds)),
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+            "-f",
+            "image2",
+            str(output),
+        ]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            **_subprocess_hide_window_kwargs(),
+        )
+        if result.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+            raise RuntimeError("原影片畫面擷取失敗")
+        return output
+
     def _build_image_thumbnail(self, image_path: Path, size: tuple[int, int]) -> Image.Image:
         try:
             with Image.open(image_path) as src:

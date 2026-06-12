@@ -60,11 +60,15 @@ jobs:
 
       - name: Build Python sidecar
         run: |
-          npm run sidecar:mac
+          npm run sidecar
+
+      - name: Verify sidecar ffmpeg
+        run: |
+          bash scripts/verify_sidecar_ffmpeg.sh
 
       - name: Build Tauri app
         run: |
-          npm run tauri:build
+          cd src-tauri && tauri build
 
       - name: Show bundle output
         run: |

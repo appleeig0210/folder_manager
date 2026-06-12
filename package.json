@@ -8,12 +8,14 @@
     "dev": "concurrently \"npm run dev:api\" \"npm run dev:ui\"",
     "build:ui": "npm run build --prefix frontend",
     "icons": "python scripts/generate_app_icons.py",
+    "sidecar": "node scripts/build_sidecar.mjs",
     "sidecar:win": "powershell -ExecutionPolicy Bypass -File scripts/build_sidecar.ps1",
     "sidecar:mac": "bash scripts/build_sidecar_macos.sh",
+    "verify:sidecar-ffmpeg": "bash scripts/verify_sidecar_ffmpeg.sh",
     "start": "python scripts/launch_app.py",
     "start:browser": "python scripts/launch_app.py --browser-only",
     "tauri:dev": "cd src-tauri && tauri dev",
-    "tauri:build": "cd src-tauri && tauri build"
+    "tauri:build": "npm run sidecar && cd src-tauri && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.2",

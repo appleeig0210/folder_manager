@@ -4,6 +4,7 @@ import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
+import re
 
 from people_data_store import PeopleDataStore
 from tag_repository import TagRepository
@@ -49,6 +50,42 @@ class FileOperationsService:
             if not candidate.exists():
                 return candidate
             index += 1
+
+    @staticmethod
+    def _numbered_screenshot_base(stem: str) -> str:
+        match = re.match(r"^(?P<base>.+)-(?P<number>\d+)$", stem)
+        return match.group("base") if match else stem
+
+    @classmethod
+    def build_next_video_frame_path(cls, video_path: Path) -> Path:
+        video = Path(video_path).resolve()
+        base = cls._numbered_screenshot_base(video.stem)
+        highest = 0
+        pattern = re.compile(rf"^{re.escape(base)}-(\d+)$")
+
+        for sibling in video.parent.iterdir():
+            if not sibling.is_file():
+                continue
+            if sibling.stem == base:
+                highest = max(highest, 0)
+                continue
+            match = pattern.match(sibling.stem)
+            if match:
+                highest = max(highest, int(match.group(1)))
+
+        return video.parent / f"{base}-{highest + 1}.png"
+
+    def save_video_frame_png(self, video_path: Path, png_data: bytes) -> Path:
+        video = Path(video_path).resolve()
+        if not video.is_file():
+            raise FileNotFoundError("找不到影片檔案")
+        if not png_data.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("圖片資料不是有效的 PNG")
+
+        target = self.build_next_video_frame_path(video)
+        target.write_bytes(png_data)
+        self.store.clear_cache()
+        return target.resolve()
 
     def create_folder(self, parent_path: Path, name: str) -> Path:
         if not self.is_valid_folder_basename(name):
@@ -258,10 +295,13 @@ class FileOperationsService:
     def apply_rename_plan(self, plan: list[tuple[Path, Path]], *, is_folder: bool) -> list[tuple[str, str]]:
         old_new_rel_pairs: list[tuple[str, str]] = []
         tmp_plan: list[tuple[Path, Path, Path]] = []
+        touched_parents: set[Path] = set()
         try:
             for old, new in plan:
                 if old == new:
                     continue
+                touched_parents.add(old.parent)
+                touched_parents.add(new.parent)
                 if is_folder:
                     try:
                         old_rel = self.store.to_relative_key(old)
@@ -287,6 +327,9 @@ class FileOperationsService:
                 if old_rel and new_rel:
                     self.tag_repo.rename_relative_path_root(old_rel, new_rel)
             self.store.clear_cache()
+        else:
+            for parent in touched_parents:
+                self.store.invalidate_folder_cache(parent)
         return old_new_rel_pairs
 
     def open_path_external(self, path: Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -12,11 +13,56 @@ from api.schemas import (
     RenameFileRequest,
     RenameFolderRequest,
     ReorderRequest,
+    SaveVideoFrameRequest,
     StatusResponse,
     TransferRequest,
 )
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+
+
+def _remap_path_value(value: str, path_pairs: list[tuple[Path, Path]]) -> str:
+    path = Path(value).resolve()
+    for old, new in sorted(path_pairs, key=lambda pair: len(str(pair[0])), reverse=True):
+        try:
+            relative = path.relative_to(old)
+        except ValueError:
+            continue
+        return str((new / relative).resolve())
+    return str(path)
+
+
+def _remap_scope_path(scope_path: str, path_pairs: list[tuple[Path, Path]]) -> str:
+    if "||" not in scope_path:
+        return _remap_path_value(scope_path, path_pairs)
+    return "||".join(_remap_path_value(part, path_pairs) for part in scope_path.split("||"))
+
+
+def _sync_manual_order_after_rename(order_map: dict[str, list[str]], plan: list[tuple[Path, Path]]) -> None:
+    path_pairs = [(old.resolve(), new.resolve()) for old, new in plan]
+    if not path_pairs:
+        return
+
+    updated: dict[str, list[str]] = {}
+    for scope_path, order in order_map.items():
+        next_scope = _remap_scope_path(scope_path, path_pairs)
+        next_order: list[str] = []
+        seen: set[str] = set()
+        for item_id in order:
+            next_id = _remap_path_value(item_id, path_pairs)
+            if next_id in seen:
+                continue
+            seen.add(next_id)
+            next_order.append(next_id)
+
+        if next_scope in updated:
+            existing = set(updated[next_scope])
+            updated[next_scope].extend(item_id for item_id in next_order if item_id not in existing)
+        else:
+            updated[next_scope] = next_order
+
+    order_map.clear()
+    order_map.update(updated)
 
 
 @router.post("/folder", response_model=StatusResponse)
@@ -32,10 +78,13 @@ def create_folder(body: CreateFolderRequest) -> StatusResponse:
 @router.patch("/folder/rename", response_model=StatusResponse)
 def rename_folder(body: RenameFolderRequest) -> StatusResponse:
     ctx = get_ctx()
+    old_path = Path(body.path).resolve()
     try:
-        new_path = ctx.file_ops.rename_folder(Path(body.path), body.new_name)
+        new_path = ctx.file_ops.rename_folder(old_path, body.new_name)
     except (ValueError, FileExistsError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _sync_manual_order_after_rename(ctx.manual_entry_order, [(old_path, new_path)])
+    _sync_manual_order_after_rename(ctx.manual_media_order, [(old_path, new_path)])
     return StatusResponse(message=f"已重新命名：{new_path.name}")
 
 
@@ -52,11 +101,52 @@ def delete_folder(path: str) -> StatusResponse:
 @router.patch("/file/rename", response_model=StatusResponse)
 def rename_file(body: RenameFileRequest) -> StatusResponse:
     ctx = get_ctx()
+    old_path = Path(body.path).resolve()
     try:
-        new_path = ctx.file_ops.rename_file(Path(body.path), body.new_stem)
+        new_path = ctx.file_ops.rename_file(old_path, body.new_stem)
     except (ValueError, FileExistsError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _sync_manual_order_after_rename(ctx.manual_media_order, [(old_path, new_path)])
     return StatusResponse(message=f"已重新命名：{new_path.name}")
+
+
+@router.post("/video-frame", response_model=StatusResponse)
+def save_video_frame(body: SaveVideoFrameRequest) -> StatusResponse:
+    ctx = get_ctx()
+    try:
+        video_path = Path(body.video_path)
+        if body.timestamp_seconds is not None:
+            target = ctx.file_ops.build_next_video_frame_path(video_path)
+            try:
+                saved_path = ctx.thumbnail_service.extract_video_frame_png(
+                    video_path,
+                    target,
+                    body.timestamp_seconds,
+                )
+                ctx.store.clear_cache()
+            except Exception:
+                if not body.image_data_url:
+                    raise
+                prefix, encoded = body.image_data_url.split(",", 1)
+                if "image/png" not in prefix:
+                    raise ValueError("圖片格式必須是 PNG")
+                png_data = base64.b64decode(encoded, validate=True)
+                saved_path = ctx.file_ops.save_video_frame_png(video_path, png_data)
+        else:
+            if not body.image_data_url:
+                raise ValueError("缺少圖片資料")
+            prefix, encoded = body.image_data_url.split(",", 1)
+            if "image/png" not in prefix:
+                raise ValueError("圖片格式必須是 PNG")
+            png_data = base64.b64decode(encoded, validate=True)
+            saved_path = ctx.file_ops.save_video_frame_png(video_path, png_data)
+        ctx.preview_service.clear_filter_cache()
+    except (ValueError, FileNotFoundError, RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return StatusResponse(
+        message=f"已儲存圖片：{saved_path.name}",
+        saved_path=str(saved_path),
+    )
 
 
 @router.delete("/files", response_model=StatusResponse)
@@ -109,7 +199,12 @@ def rename_numbered(body: NumberedRenameRequest) -> StatusResponse:
         ctx.file_ops.apply_rename_plan(plan, is_folder=body.is_folder)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return StatusResponse(message=f"已重新命名 {len(paths)} 個項目")
+    _sync_manual_order_after_rename(ctx.manual_entry_order, plan)
+    _sync_manual_order_after_rename(ctx.manual_media_order, plan)
+    return StatusResponse(
+        message=f"已重新命名 {len(paths)} 個項目",
+        renamed_paths=[str(new.resolve()) for _old, new in plan],
+    )
 
 
 @router.post("/reorder", response_model=StatusResponse)

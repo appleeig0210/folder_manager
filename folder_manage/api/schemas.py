@@ -101,6 +101,12 @@ class RenameFileRequest(BaseModel):
     new_stem: str
 
 
+class SaveVideoFrameRequest(BaseModel):
+    video_path: str
+    image_data_url: Optional[str] = None
+    timestamp_seconds: Optional[float] = None
+
+
 class TransferRequest(BaseModel):
     source_paths: list[str]
     target_folder: str
@@ -126,6 +132,8 @@ class ReorderRequest(BaseModel):
 class StatusResponse(BaseModel):
     message: str
     ok: bool = True
+    renamed_paths: Optional[list[str]] = None
+    saved_path: Optional[str] = None
 
 
 class ImportTagsRequest(BaseModel):

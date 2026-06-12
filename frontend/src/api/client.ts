@@ -112,10 +112,10 @@ export const api = {
       }
     })
   },
-  entryThumbUrl: (path: string) =>
-    `${API_BASE}/api/thumbnails/entry?path=${encodeURIComponent(path)}`,
-  mediaThumbUrl: (path: string, mediaType: string) =>
-    `${API_BASE}/api/thumbnails/media?path=${encodeURIComponent(path)}&media_type=${mediaType}`,
+  entryThumbUrl: (path: string, version = 0) =>
+    `${API_BASE}/api/thumbnails/entry?path=${encodeURIComponent(path)}&v=${version}`,
+  mediaThumbUrl: (path: string, mediaType: string, version = 0) =>
+    `${API_BASE}/api/thumbnails/media?path=${encodeURIComponent(path)}&media_type=${mediaType}&v=${version}`,
   mediaFileUrl: (path: string) =>
     `${API_BASE}/api/thumbnails/file?token=${encodePathToken(path)}`,
   getTags: () => request<TagListResponse>('/api/tags'),
@@ -159,6 +159,11 @@ export const api = {
     request<StatusResponse>('/api/files/file/rename', {
       method: 'PATCH',
       body: JSON.stringify({ path, new_stem }),
+    }),
+  saveVideoFrame: (video_path: string, image_data_url: string, timestamp_seconds?: number) =>
+    request<StatusResponse>('/api/files/video-frame', {
+      method: 'POST',
+      body: JSON.stringify({ video_path, image_data_url, timestamp_seconds }),
     }),
   deleteFiles: (paths: string[]) =>
     request<StatusResponse>('/api/files/files', {

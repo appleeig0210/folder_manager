@@ -26,6 +26,61 @@ const DEFAULT_FILTER: FilterState = {
   sort_mode: 'name',
 }
 
+const filenameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+function normalizeId(id: string): string {
+  return id.replaceAll('\\', '/').toLocaleLowerCase()
+}
+
+function replacePathFileName(path: string, fileName: string): string {
+  const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  if (separatorIndex < 0) return fileName
+  return `${path.slice(0, separatorIndex + 1)}${fileName}`
+}
+
+function buildFallbackRenamedIds(paths: string[], base: string, startNo: number, isFolder: boolean): string[] {
+  return paths.map((path, index) => {
+    const fileName = path.split(/[/\\]/).pop() ?? ''
+    const suffix = isFolder ? '' : fileName.match(/\.[^.]+$/)?.[0] ?? ''
+    return replacePathFileName(path, `${base}-${startNo + index}${suffix}`)
+  })
+}
+
+function reorderRenamedItems<T extends { id: string }>(
+  items: T[],
+  orderBeforeRename: string[],
+  renameMap: Map<string, string>,
+  getName: (item: T) => string,
+): T[] {
+  const itemById = new Map(items.map((item) => [normalizeId(item.id), item]))
+  const renamedSet = new Set(Array.from(renameMap.values(), normalizeId))
+  const ordered = orderBeforeRename
+    .map((id) => itemById.get(normalizeId(renameMap.get(id) ?? id)))
+    .filter((item): item is T => Boolean(item))
+  const seen = new Set(ordered.map((item) => item.id))
+  ordered.push(...items.filter((item) => !seen.has(item.id)))
+
+  const renamedQueue = ordered
+    .filter((item) => renamedSet.has(normalizeId(item.id)))
+    .sort((a, b) => filenameCollator.compare(getName(a), getName(b)))
+  const unchanged = ordered.filter((item) => !renamedSet.has(normalizeId(item.id)))
+  const result: T[] = []
+  let nextRenamedIndex = 0
+
+  for (const item of unchanged) {
+    while (
+      nextRenamedIndex < renamedQueue.length &&
+      filenameCollator.compare(getName(renamedQueue[nextRenamedIndex]), getName(item)) <= 0
+    ) {
+      result.push(renamedQueue[nextRenamedIndex++])
+    }
+    result.push(item)
+  }
+
+  result.push(...renamedQueue.slice(nextRenamedIndex))
+  return result
+}
+
 export default function App() {
   const [config, setConfig] = useState({ root_folder: '', has_root: false })
   const [tree, setTree] = useState<TreeNode[]>([])
@@ -48,6 +103,7 @@ export default function App() {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; targetId: string } | null>(null)
   const [loading, setLoading] = useState(false)
+  const [thumbnailVersion, setThumbnailVersion] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const applyTheme = (dark: boolean) => {
@@ -78,8 +134,10 @@ export default function App() {
       setBreadcrumb(res.breadcrumb)
       setSelectedIds(new Set())
       setStatus(`已載入 ${res.items.length} 個子資料夾`)
+      return res
     } catch (e) {
       setStatus(String(e))
+      return null
     } finally {
       setLoading(false)
     }
@@ -97,6 +155,7 @@ export default function App() {
       setBreadcrumb(res.breadcrumb)
       setSelectedIds(new Set())
       setStatus(`已載入 ${res.items.length} 個媒體`)
+      return res
     } catch (e) {
       setViewMode('media')
       setEntries([])
@@ -104,6 +163,7 @@ export default function App() {
       setScopeLabel('媒體預覽載入失敗')
       setBreadcrumb([])
       setStatus(String(e))
+      return null
     } finally {
       setLoading(false)
     }
@@ -324,10 +384,12 @@ export default function App() {
         { label: '刪除資料夾', danger: true, onClick: () => confirmDeleteFolder(entry.path) },
       )
     } else if (mediaItem) {
+      const targetPaths =
+        selectedIds.has(mediaItem.id) && selectedIds.size > 1 ? selectedPaths : [mediaItem.path]
       items.push(
         { label: '以程式開啟', onClick: () => api.openPath(mediaItem.path) },
         { label: '重新命名檔案', onClick: () => promptRenameFile(mediaItem.path) },
-        { label: '轉移已選取項目到…', onClick: () => promptTransfer([mediaItem.path]) },
+        { label: '轉移已選取項目到…', onClick: () => promptTransfer(targetPaths) },
         { separator: true, label: '', onClick: () => {} },
         { label: '刪除檔案', danger: true, onClick: () => confirmDeleteFiles([mediaItem.path]) },
       )
@@ -358,6 +420,7 @@ export default function App() {
     const name = window.prompt('新資料夾名稱：', current)
     if (!name || name === current) return
     const res = await api.renameFolder(path, name)
+    setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
     await refreshTree()
     await loadEntries(selectedTreePaths)
@@ -369,14 +432,30 @@ export default function App() {
     const name = window.prompt('新主檔名：', stem)
     if (!name) return
     const res = await api.renameFile(path, name)
+    setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
     await reloadCurrentPreview()
   }
 
   const promptTransfer = async (paths: string[]) => {
-    const target = window.prompt('目標資料夾完整路徑：')
+    let target = ''
+    if (isTauriRuntime()) {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: '選擇轉移目標資料夾',
+        defaultPath: selectedTreePaths[0] || config.root_folder || undefined,
+      })
+      if (!selected || Array.isArray(selected)) return
+      target = selected
+    } else {
+      target = window.prompt('目標資料夾完整路徑：', selectedTreePaths[0] || config.root_folder) ?? ''
+    }
+    target = normalizeFolderPath(target)
     if (!target) return
     const res = await api.transfer(paths, target)
+    setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
     await refreshTree()
     await reloadCurrentPreview()
@@ -386,6 +465,7 @@ export default function App() {
   const confirmDeleteFolder = async (path: string) => {
     if (!window.confirm('確定刪除此資料夾及其所有內容？')) return
     const res = await api.deleteFolder(path)
+    setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
     await refreshTree()
     if (config.root_folder) await loadEntries([config.root_folder])
@@ -394,6 +474,7 @@ export default function App() {
   const confirmDeleteFiles = async (paths: string[]) => {
     if (!window.confirm(`確定刪除 ${paths.length} 個檔案？`)) return
     const res = await api.deleteFiles(paths)
+    setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
     await reloadCurrentPreview()
     setSelectedIds(new Set())
@@ -459,7 +540,8 @@ export default function App() {
     setStatus(`已匯出 ${format.toUpperCase()} 標籤`)
   }
 
-  const selectedPaths = Array.from(selectedIds)
+  const visibleItems = viewMode === 'entries' ? entries : media
+  const selectedPaths = visibleItems.filter((item) => selectedIds.has(item.id)).map((item) => item.path)
 
   return (
     <>
@@ -514,6 +596,7 @@ export default function App() {
           entries={entries}
           media={media}
           selectedIds={selectedIds}
+          thumbnailVersion={thumbnailVersion}
           sortable
           onSelect={handleSelect}
           onDoubleClickEntry={handleDoubleClickEntry}
@@ -568,12 +651,46 @@ export default function App() {
           if (!base) return
           const startRaw = window.prompt('起始序號：', '1')
           if (!startRaw) return
+          const startNo = parseInt(startRaw, 10)
+          const orderBeforeRename = visibleItems.map((item) => item.id)
           const res = await api.renameNumbered(
             selectedPaths,
             base,
-            parseInt(startRaw, 10),
+            startNo,
             viewMode === 'entries',
           )
+          setThumbnailVersion((version) => version + 1)
+          if (filter.sort_mode === 'manual') {
+            const renamedIds = res.renamed_paths?.length
+              ? res.renamed_paths
+              : buildFallbackRenamedIds(selectedPaths, base, startNo, viewMode === 'entries')
+            const renameMap = new Map(selectedPaths.map((oldId, index) => [oldId, renamedIds[index] ?? oldId]))
+            if (viewMode === 'media') {
+              const target = getMediaReloadTarget()
+              const preview = target ? await loadMedia(target) : null
+              if (preview) {
+                const reordered = reorderRenamedItems(preview.items, orderBeforeRename, renameMap, (item) => item.name)
+                setMedia(reordered)
+                await api.reorder(preview.scope_path, 'media', reordered.map((item) => item.id))
+                setStatus(`${res.message}，已依序號更新手動排序`)
+                return
+              }
+            } else if (selectedTreePaths.length) {
+              const preview = await loadEntries(selectedTreePaths)
+              if (preview) {
+                const reordered = reorderRenamedItems(
+                  preview.items,
+                  orderBeforeRename,
+                  renameMap,
+                  (item) => item.subfolder_name,
+                )
+                setEntries(reordered)
+                await api.reorder(preview.scope_path, 'entries', reordered.map((item) => item.id))
+                setStatus(`${res.message}，已依序號更新手動排序`)
+                return
+              }
+            }
+          }
           setStatus(res.message)
           await reloadCurrentPreview()
         }}
@@ -591,7 +708,18 @@ export default function App() {
       />
 
       {lightboxIndex !== null && (
-        <MediaLightbox items={media} initialIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />
+        <MediaLightbox
+          items={media}
+          initialIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+          onStatus={setStatus}
+          onFrameSaved={async (message) => {
+            setThumbnailVersion((version) => version + 1)
+            await refreshTree()
+            await reloadCurrentPreview()
+            setStatus(message)
+          }}
+        />
       )}
 
       {contextMenu && (

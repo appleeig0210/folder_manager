@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "identifier": "com.peoplefoldermanager.app",
   "build": {
-    "beforeDevCommand": "npm run dev --prefix frontend",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm run build --prefix frontend",
     "frontendDist": "../frontend/dist"
@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset:; connect-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 ws://127.0.0.1:8765 ws://localhost:8765; img-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 data: blob:; style-src 'self' 'unsafe-inline' asset:; script-src 'self' 'unsafe-inline' asset:"
+      "csp": "default-src 'self' asset:; connect-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 ws://127.0.0.1:8765 ws://localhost:8765; img-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 data: blob:; media-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 blob:; style-src 'self' 'unsafe-inline' asset:; script-src 'self' 'unsafe-inline' asset:"
     }
   },
   "bundle": {

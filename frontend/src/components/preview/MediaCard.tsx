@@ -7,6 +7,7 @@ import { GripVertical, Film, ImageIcon, Upload } from 'lucide-react'
 interface MediaCardProps {
   item: MediaItem
   selected: boolean
+  thumbnailVersion?: number
   sortable?: boolean
   dragging?: boolean
   dropPosition?: 'before' | 'after' | null
@@ -24,6 +25,7 @@ interface MediaCardProps {
 export function MediaCard({
   item,
   selected,
+  thumbnailVersion = 0,
   sortable,
   dragging,
   dropPosition,
@@ -37,8 +39,10 @@ export function MediaCard({
   onDragLeave,
   onDrop,
 }: MediaCardProps) {
-  const [loaded, setLoaded] = useState(false)
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null)
   const canNativeDrag = Boolean(nativeDragPaths?.length)
+  const thumbnailSrc = api.mediaThumbUrl(item.path, item.media_type, thumbnailVersion)
+  const loaded = loadedSrc === thumbnailSrc
 
   const startInternalDrag = (e: React.DragEvent<HTMLElement>) => {
     if (!sortable) {
@@ -103,13 +107,14 @@ export function MediaCard({
       >
         {!loaded && <div className="absolute inset-0 skeleton" />}
         <img
-          src={api.mediaThumbUrl(item.path, item.media_type)}
+          src={thumbnailSrc}
           alt={item.name}
           draggable={false}
           onDragStart={(e) => e.preventDefault()}
           className={cn('w-full h-full object-contain', loaded ? 'opacity-100' : 'opacity-0')}
           loading="lazy"
-          onLoad={() => setLoaded(true)}
+          onLoad={() => setLoadedSrc(thumbnailSrc)}
+          onError={() => setLoadedSrc(thumbnailSrc)}
         />
         <span className="absolute bottom-1.5 right-1.5 p-1 rounded bg-black/50 text-white">
           {item.media_type === 'video' ? <Film className="w-3 h-3" /> : <ImageIcon className="w-3 h-3" />}

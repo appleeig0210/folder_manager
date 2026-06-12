@@ -7,6 +7,7 @@ import { GripVertical, Film, ImageIcon } from 'lucide-react'
 interface EntryCardProps {
   item: EntryItem
   selected: boolean
+  thumbnailVersion?: number
   sortable?: boolean
   dragging?: boolean
   dropPosition?: 'before' | 'after' | null
@@ -23,6 +24,7 @@ interface EntryCardProps {
 export function EntryCard({
   item,
   selected,
+  thumbnailVersion = 0,
   sortable,
   dragging,
   dropPosition,
@@ -35,8 +37,10 @@ export function EntryCard({
   onDragLeave,
   onDrop,
 }: EntryCardProps) {
-  const [loaded, setLoaded] = useState(false)
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null)
   const tags = item.tags.length ? item.tags.join(', ') : '（尚未標籤）'
+  const thumbnailSrc = api.entryThumbUrl(item.path, thumbnailVersion)
+  const loaded = loadedSrc === thumbnailSrc
 
   const startInternalDrag = (e: React.DragEvent<HTMLElement>) => {
     if (!sortable) {
@@ -101,13 +105,14 @@ export function EntryCard({
         </button>
         {!loaded && <div className="absolute inset-0 skeleton" />}
         <img
-          src={api.entryThumbUrl(item.path)}
+          src={thumbnailSrc}
           alt={item.subfolder_name}
           draggable={false}
           onDragStart={(e) => e.preventDefault()}
           className={cn('w-full h-full object-contain', loaded ? 'opacity-100' : 'opacity-0')}
           loading="lazy"
-          onLoad={() => setLoaded(true)}
+          onLoad={() => setLoadedSrc(thumbnailSrc)}
+          onError={() => setLoadedSrc(thumbnailSrc)}
         />
         {item.preview_type && (
           <span className="absolute bottom-1.5 right-1.5 p-1 rounded bg-black/50 text-white">
