@@ -70,7 +70,15 @@ if _FRONTEND_DIST.exists():
 
 
 def run():
+    import signal
     import uvicorn
+
+    def _handle_shutdown(_signum, _frame):
+        get_ctx().shutdown()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _handle_shutdown)
+    signal.signal(signal.SIGTERM, _handle_shutdown)
 
     # 打包成 exe 時不能用字串模組路徑，否則 uvicorn 無法 import api.main。
     uvicorn.run(app, host="127.0.0.1", port=8765, reload=False)
