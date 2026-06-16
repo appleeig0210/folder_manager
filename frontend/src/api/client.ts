@@ -134,6 +134,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ relative_key, tags }),
     }),
+  deleteTags: (tags: string[]) =>
+    request<TagListResponse>('/api/tags/delete', {
+      method: 'POST',
+      body: JSON.stringify({ tags }),
+    }),
   exportTags: async (format: 'json' | 'csv') => {
     const res = await fetch(`${API_BASE}/api/tags/export?format=${format}`)
     return res.text()
@@ -174,6 +179,11 @@ export const api = {
     request<StatusResponse>('/api/files/transfer', {
       method: 'POST',
       body: JSON.stringify({ source_paths, target_folder }),
+    }),
+  mergeFolders: (folder_paths: string[], conflict_strategy: 'ask' | 'keep' | 'skip' | 'cancel' = 'ask') =>
+    request<StatusResponse>('/api/files/folders/merge', {
+      method: 'POST',
+      body: JSON.stringify({ folder_paths, conflict_strategy }),
     }),
   renameNumbered: (paths: string[], base: string, start_no: number, is_folder: boolean) =>
     request<StatusResponse>('/api/files/rename-numbered', {

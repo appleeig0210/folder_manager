@@ -149,6 +149,29 @@ class TagRepository:
             self.save()
         return updated_keys
 
+    def remove_tags_everywhere(self, tags: list[str]) -> int:
+        tokens = {(tag or "").strip().casefold() for tag in tags if (tag or "").strip()}
+        if not tokens:
+            return 0
+
+        updated_keys = 0
+        keys_to_delete: list[str] = []
+        for key, current_tags in list(self._tags_by_key.items()):
+            new_tags = [tag for tag in current_tags if tag.casefold() not in tokens]
+            if len(new_tags) == len(current_tags):
+                continue
+            updated_keys += 1
+            if new_tags:
+                self._tags_by_key[key] = self._normalize_tags(new_tags)
+            else:
+                keys_to_delete.append(key)
+
+        for key in keys_to_delete:
+            del self._tags_by_key[key]
+        if updated_keys:
+            self.save()
+        return updated_keys
+
     def export_json(self, output_path: Path) -> None:
         path = Path(output_path)
         path.write_text(json.dumps(self._tags_by_key, ensure_ascii=False, indent=2), encoding="utf-8")

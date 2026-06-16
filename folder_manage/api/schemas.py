@@ -86,6 +86,10 @@ class SetTagsRequest(BaseModel):
     tags: list[str]
 
 
+class DeleteTagsRequest(BaseModel):
+    tags: list[str]
+
+
 class CreateFolderRequest(BaseModel):
     parent_path: str
     name: str
@@ -112,6 +116,11 @@ class TransferRequest(BaseModel):
     target_folder: str
 
 
+class MergeFoldersRequest(BaseModel):
+    folder_paths: list[str]
+    conflict_strategy: Literal["ask", "keep", "skip", "cancel"] = "ask"
+
+
 class DeleteFilesRequest(BaseModel):
     paths: list[str]
 
@@ -134,6 +143,8 @@ class StatusResponse(BaseModel):
     ok: bool = True
     renamed_paths: Optional[list[str]] = None
     saved_path: Optional[str] = None
+    conflicts: Optional[list[dict[str, str]]] = None
+    deleted_sources: Optional[list[str]] = None
 
 
 class ImportTagsRequest(BaseModel):

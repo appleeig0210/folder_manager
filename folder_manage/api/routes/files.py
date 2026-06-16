@@ -9,6 +9,7 @@ from api.deps import get_ctx
 from api.schemas import (
     CreateFolderRequest,
     DeleteFilesRequest,
+    MergeFoldersRequest,
     NumberedRenameRequest,
     RenameFileRequest,
     RenameFolderRequest,
@@ -63,6 +64,28 @@ def _sync_manual_order_after_rename(order_map: dict[str, list[str]], plan: list[
 
     order_map.clear()
     order_map.update(updated)
+
+
+def _remove_deleted_folders_from_tree_order(ctx, deleted_folders: list[str]) -> None:
+    order_map = ctx.config.get("tree_child_order")
+    if not isinstance(order_map, dict):
+        return
+
+    changed = False
+    for raw_path in deleted_folders:
+        folder = Path(raw_path).resolve()
+        parent_key = str(folder.parent.resolve())
+        names = order_map.get(parent_key)
+        if isinstance(names, list) and folder.name in names:
+            order_map[parent_key] = [name for name in names if name != folder.name]
+            changed = True
+        folder_key = str(folder)
+        if folder_key in order_map:
+            del order_map[folder_key]
+            changed = True
+
+    if changed:
+        ctx.save_config()
 
 
 @router.post("/folder", response_model=StatusResponse)
@@ -182,6 +205,41 @@ def transfer_items(body: TransferRequest) -> StatusResponse:
         except Exception as exc:
             messages.append(f"檔案轉移失敗: {exc}")
     return StatusResponse(message="；".join(messages) or "完成")
+
+
+@router.post("/folders/merge", response_model=StatusResponse)
+def merge_folders(body: MergeFoldersRequest) -> StatusResponse:
+    ctx = get_ctx()
+    paths = [Path(p).resolve() for p in body.folder_paths]
+    try:
+        conflicts = ctx.file_ops.find_folder_merge_conflicts(paths)
+        if body.conflict_strategy == "ask" and conflicts:
+            sample = "、".join(conflict["name"] for conflict in conflicts[:3])
+            suffix = "…" if len(conflicts) > 3 else ""
+            return StatusResponse(
+                ok=False,
+                message=f"發現 {len(conflicts)} 個同名項目：{sample}{suffix}",
+                conflicts=conflicts,
+            )
+        if body.conflict_strategy == "cancel":
+            return StatusResponse(message="已取消資料夾合併")
+
+        result = ctx.file_ops.merge_selected_folders(
+            paths,
+            "keep" if body.conflict_strategy == "ask" else body.conflict_strategy,
+        )
+    except (ValueError, FileExistsError, FileNotFoundError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _remove_deleted_folders_from_tree_order(ctx, result["deleted_sources"])
+    return StatusResponse(
+        message=(
+            f"已合併至 {Path(result['target_folder']).name}："
+            f"搬移 {result['moved_count']}，改名 {result['renamed_count']}，"
+            f"略過 {result['skipped_count']}，刪除來源資料夾 {result['deleted_count']} 個"
+        ),
+        deleted_sources=result["deleted_sources"],
+    )
 
 
 @router.post("/rename-numbered", response_model=StatusResponse)

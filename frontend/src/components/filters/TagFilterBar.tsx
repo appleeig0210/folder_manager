@@ -7,9 +7,10 @@ interface TagFilterBarProps {
   expanded: boolean
   onToggleExpand: () => void
   onToggleTag: (tag: string) => void
+  onContextMenu?: (e: React.MouseEvent, tag: string) => void
 }
 
-export function TagFilterBar({ allTags, filter, expanded, onToggleExpand, onToggleTag }: TagFilterBarProps) {
+export function TagFilterBar({ allTags, filter, expanded, onToggleExpand, onToggleTag, onContextMenu }: TagFilterBarProps) {
   return (
     <div className="border-b border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2">
       <div className="flex items-center justify-between gap-2 mb-2">
@@ -34,6 +35,10 @@ export function TagFilterBar({ allTags, filter, expanded, onToggleExpand, onTogg
                 key={tag}
                 type="button"
                 onClick={() => onToggleTag(tag)}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  onContextMenu?.(e, tag)
+                }}
                 className={cn(
                   'px-3 py-1 rounded-[var(--radius-pill)] text-xs font-medium transition-colors border',
                   active

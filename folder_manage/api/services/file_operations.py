@@ -52,6 +52,24 @@ class FileOperationsService:
             index += 1
 
     @staticmethod
+    def build_parenthesized_non_conflict_path(folder: Path, base_name: str) -> Path:
+        candidate = folder / base_name
+        if not candidate.exists():
+            return candidate
+        stem = Path(base_name).stem
+        suffix = Path(base_name).suffix
+        index = 1
+        while True:
+            candidate = folder / f"{stem}({index}){suffix}"
+            if not candidate.exists():
+                return candidate
+            index += 1
+
+    @staticmethod
+    def _count_files(folder: Path) -> int:
+        return sum(1 for item in Path(folder).rglob("*") if item.is_file())
+
+    @staticmethod
     def _numbered_screenshot_base(stem: str) -> str:
         match = re.match(r"^(?P<base>.+)-(?P<number>\d+)$", stem)
         return match.group("base") if match else stem
@@ -235,6 +253,133 @@ class FileOperationsService:
             "renamed_count": renamed_count,
             "skipped_same_folder": skipped_same_folder,
             "failed_count": failed_count,
+        }
+
+    def _validate_merge_folders(self, folder_paths: list[Path]) -> list[Path]:
+        folders = [Path(p).resolve() for p in folder_paths]
+        if len(folders) < 2:
+            raise ValueError("請至少選擇兩個資料夾")
+        if len(set(folders)) != len(folders):
+            raise ValueError("選取資料夾不可重複")
+
+        root = self.store.ensure_root_folder().resolve()
+        for folder in folders:
+            if not folder.is_dir():
+                raise FileNotFoundError(f"資料夾不存在：{folder}")
+            if folder == root:
+                raise ValueError("不可合併主資料夾")
+
+        for index, folder in enumerate(folders):
+            for other in folders[index + 1:]:
+                if folder.is_relative_to(other) or other.is_relative_to(folder):
+                    raise ValueError("不可同時選取父資料夾與其子資料夾進行合併")
+        return folders
+
+    def find_folder_merge_conflicts(self, folder_paths: list[Path]) -> list[dict[str, str]]:
+        folders = self._validate_merge_folders(folder_paths)
+        target = folders[0]
+        occupied: dict[tuple[str, ...], str] = {}
+        conflicts: list[dict[str, str]] = []
+
+        for item in target.rglob("*"):
+            relative = item.relative_to(target).parts
+            occupied[relative] = "dir" if item.is_dir() else "file"
+
+        for source in folders[1:]:
+            for item in sorted(source.rglob("*"), key=lambda p: str(p.relative_to(source)).casefold()):
+                relative = item.relative_to(source).parts
+                kind = "dir" if item.is_dir() else "file"
+                existing_kind = occupied.get(relative)
+                if existing_kind is not None and not (kind == "dir" and existing_kind == "dir"):
+                    conflicts.append({
+                        "source_path": str(item.resolve()),
+                        "target_path": str((target / Path(*relative)).resolve()),
+                        "name": item.name,
+                    })
+                    continue
+                occupied.setdefault(relative, kind)
+        return conflicts
+
+    def _merge_folder_tags(self, old_folder: Path, new_folder: Path) -> None:
+        try:
+            old_rel = self.store.to_relative_key(old_folder)
+            new_rel = self.store.to_relative_key(new_folder)
+        except Exception:
+            return
+        if old_rel and new_rel:
+            self.tag_repo.rename_relative_path_root(old_rel, new_rel)
+
+    def merge_selected_folders(self, folder_paths: list[Path], conflict_strategy: str) -> dict:
+        if conflict_strategy not in {"keep", "skip"}:
+            raise ValueError("衝突處理策略無效")
+
+        folders = self._validate_merge_folders(folder_paths)
+        target = folders[0]
+        moved_count = 0
+        renamed_count = 0
+        skipped_count = 0
+        deleted_sources: list[Path] = []
+
+        def move_or_merge(source_dir: Path, target_dir: Path) -> None:
+            nonlocal moved_count, renamed_count, skipped_count
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            for item in sorted(source_dir.iterdir(), key=lambda p: p.name.lower()):
+                candidate = target_dir / item.name
+                if item.is_dir():
+                    if not candidate.exists():
+                        shutil.move(str(item), str(candidate))
+                        moved_count += self._count_files(candidate)
+                        self._merge_folder_tags(item, candidate)
+                        continue
+
+                    if candidate.is_dir():
+                        move_or_merge(item, candidate)
+                        continue
+
+                    if conflict_strategy == "skip":
+                        skipped_count += self._count_files(item)
+                        continue
+
+                    renamed_target = self.build_parenthesized_non_conflict_path(target_dir, item.name)
+                    shutil.move(str(item), str(renamed_target))
+                    moved_count += self._count_files(renamed_target)
+                    renamed_count += 1
+                    self._merge_folder_tags(item, renamed_target)
+                    continue
+
+                if not item.is_file():
+                    continue
+
+                if candidate.exists():
+                    if conflict_strategy == "skip":
+                        skipped_count += 1
+                        continue
+                    candidate = self.build_parenthesized_non_conflict_path(target_dir, item.name)
+                    renamed_count += 1
+
+                shutil.move(str(item), str(candidate))
+                moved_count += 1
+
+            try:
+                source_dir.rmdir()
+                self._merge_folder_tags(source_dir, target_dir)
+            except OSError:
+                pass
+
+        for source in folders[1:]:
+            move_or_merge(source, target)
+            if not source.exists():
+                deleted_sources.append(source)
+
+        self.store.clear_cache()
+        return {
+            "target_folder": str(target),
+            "moved_count": moved_count,
+            "renamed_count": renamed_count,
+            "skipped_count": skipped_count,
+            "deleted_count": len(deleted_sources),
+            "deleted_sources": [str(path) for path in deleted_sources],
         }
 
     def build_numbered_plan(

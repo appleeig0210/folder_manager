@@ -15,6 +15,7 @@ import { PreviewGrid } from './components/preview/PreviewGrid'
 import { SelectionToolbar } from './components/preview/SelectionToolbar'
 import { MediaLightbox } from './components/media/MediaLightbox'
 import { ContextMenu, type ContextMenuItem } from './components/ui/ContextMenu'
+import { Button } from './components/ui/Button'
 import { isTauriRuntime, normalizeFolderPath } from './lib/utils'
 
 const DEFAULT_FILTER: FilterState = {
@@ -27,6 +28,9 @@ const DEFAULT_FILTER: FilterState = {
 }
 
 const filenameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+type FolderMergeConflict = { source_path: string; target_path: string; name: string }
+type FolderMergeStrategy = 'keep' | 'skip'
 
 function normalizeId(id: string): string {
   return id.replaceAll('\\', '/').toLocaleLowerCase()
@@ -102,9 +106,24 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(false)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; targetId: string } | null>(null)
+  const [sidebarContextMenu, setSidebarContextMenu] = useState<{ x: number; y: number; paths: string[] } | null>(null)
+  const [tagContextMenu, setTagContextMenu] = useState<{ x: number; y: number; tag: string } | null>(null)
+  const [folderMergePrompt, setFolderMergePrompt] = useState<{
+    paths: string[]
+    message: string
+    conflicts: FolderMergeConflict[]
+  } | null>(null)
+  const [sidebarPrunePaths, setSidebarPrunePaths] = useState<string[]>([])
+  const [treeRevision, setTreeRevision] = useState(0)
   const [loading, setLoading] = useState(false)
   const [thumbnailVersion, setThumbnailVersion] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (!sidebarPrunePaths.length) return
+    const id = window.setTimeout(() => setSidebarPrunePaths([]), 0)
+    return () => window.clearTimeout(id)
+  }, [sidebarPrunePaths])
 
   const applyTheme = (dark: boolean) => {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
@@ -397,6 +416,79 @@ export default function App() {
     return items
   }
 
+  const getSidebarContextItems = (paths: string[]): ContextMenuItem[] => {
+    if (paths.length < 2) return []
+    return [{ label: '合併資料夾', onClick: () => promptMergeFolders(paths) }]
+  }
+
+  const getTagContextItems = (tag: string): ContextMenuItem[] => {
+    const selectedTags = filter.selected_tags
+    const targetTags = selectedTags.includes(tag) && selectedTags.length > 1 ? selectedTags : [tag]
+    return [
+      {
+        label: targetTags.length > 1 ? `刪除已選取標籤（${targetTags.length}）` : '刪除標籤',
+        danger: true,
+        onClick: () => confirmDeleteTags(targetTags),
+      },
+    ]
+  }
+
+  const reloadAfterFolderMerge = async (targetPath: string, deletedSources: string[]) => {
+    setSelectedTreePaths([targetPath])
+    const node = findTreeNode(targetPath)
+    const targetType = classifyTreePath(targetPath, node?.type)
+    setSelectedTreeTypes({ [targetPath]: targetType })
+    setSidebarPrunePaths(deletedSources)
+    await refreshTree()
+    setTreeRevision((version) => version + 1)
+    if (targetType === 'subfolder') {
+      await loadMedia(targetPath)
+    } else {
+      await loadEntries([targetPath])
+    }
+  }
+
+  const runFolderMerge = async (paths: string[], strategy: FolderMergeStrategy) => {
+    setLoading(true)
+    setStatus(strategy === 'keep' ? '正在合併資料夾並保留同名項目…' : '正在合併資料夾並略過同名項目…')
+    try {
+      const res = await api.mergeFolders(paths, strategy)
+      setThumbnailVersion((version) => version + 1)
+      setFolderMergePrompt(null)
+      setStatus(res.message)
+      await reloadAfterFolderMerge(paths[0], res.deleted_sources ?? [])
+    } catch (e) {
+      setStatus(`合併資料夾失敗：${e}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const promptMergeFolders = async (paths: string[]) => {
+    if (paths.length < 2) return
+    setLoading(true)
+    setStatus('正在檢查資料夾合併衝突…')
+    try {
+      const res = await api.mergeFolders(paths, 'ask')
+      if (!res.ok && res.conflicts?.length) {
+        setFolderMergePrompt({
+          paths,
+          message: res.message,
+          conflicts: res.conflicts,
+        })
+        setStatus(res.message)
+        return
+      }
+      setThumbnailVersion((version) => version + 1)
+      setStatus(res.message)
+      await reloadAfterFolderMerge(paths[0], res.deleted_sources ?? [])
+    } catch (e) {
+      setStatus(`合併資料夾失敗：${e}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const promptCreateFolder = async (parent: string) => {
     const name = window.prompt('新資料夾名稱：')
     if (!name) return
@@ -414,6 +506,24 @@ export default function App() {
     setStatus(res.message)
     await loadTags()
     await reloadCurrentPreview()
+  }
+
+  const confirmDeleteTags = async (tags: string[]) => {
+    const uniqueTags = Array.from(new Set(tags)).filter(Boolean)
+    if (!uniqueTags.length) return
+    const label = uniqueTags.length === 1 ? `「${uniqueTags[0]}」` : `${uniqueTags.length} 個已選取標籤`
+    if (!window.confirm(`確定要刪除${label}？此動作會從所有資料夾移除這些標籤。`)) return
+
+    try {
+      const res = await api.deleteTags(uniqueTags)
+      setAllTags(res.all_tags)
+      setFilter(res.filter_state)
+      await refreshTree()
+      await reloadCurrentPreview()
+      setStatus(`已刪除 ${uniqueTags.length} 個標籤`)
+    } catch (e) {
+      setStatus(`刪除標籤失敗：${e}`)
+    }
   }
 
   const promptRenameFolder = async (path: string, current: string) => {
@@ -551,7 +661,18 @@ export default function App() {
           <SidebarTree
             nodes={tree}
             selectedPaths={selectedTreePaths}
+            prunePaths={sidebarPrunePaths}
+            treeRevision={treeRevision}
             onSelect={handleTreeSelect}
+            onContextMenu={(e, paths) => {
+              setContextMenu(null)
+              setTagContextMenu(null)
+              if (paths.length < 2) {
+                setSidebarContextMenu(null)
+                return
+              }
+              setSidebarContextMenu({ x: e.clientX, y: e.clientY, paths })
+            }}
             onExpandLoaded={refreshTree}
           />
         }
@@ -580,6 +701,11 @@ export default function App() {
           expanded={tagsExpanded}
           onToggleExpand={() => setTagsExpanded((v) => !v)}
           onToggleTag={toggleTag}
+          onContextMenu={(e, tag) => {
+            setContextMenu(null)
+            setSidebarContextMenu(null)
+            setTagContextMenu({ x: e.clientX, y: e.clientY, tag })
+          }}
         />
         <MediaFilterBar
           filter={filter}
@@ -603,6 +729,8 @@ export default function App() {
           onDoubleClickMedia={(_item, index) => setLightboxIndex(index)}
           onContextMenu={(e, id) => {
             e.preventDefault()
+            setSidebarContextMenu(null)
+            setTagContextMenu(null)
             setContextMenu({ x: e.clientX, y: e.clientY, targetId: id })
           }}
           onReorder={async (fromId, toId, position) => {
@@ -729,6 +857,72 @@ export default function App() {
           items={getContextItems(contextMenu.targetId)}
           onClose={() => setContextMenu(null)}
         />
+      )}
+
+      {sidebarContextMenu && (
+        <ContextMenu
+          x={sidebarContextMenu.x}
+          y={sidebarContextMenu.y}
+          items={getSidebarContextItems(sidebarContextMenu.paths)}
+          onClose={() => setSidebarContextMenu(null)}
+        />
+      )}
+
+      {tagContextMenu && (
+        <ContextMenu
+          x={tagContextMenu.x}
+          y={tagContextMenu.y}
+          items={getTagContextItems(tagContextMenu.tag)}
+          onClose={() => setTagContextMenu(null)}
+        />
+      )}
+
+      {folderMergePrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 px-4">
+          <div className="w-full max-w-[460px] rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-panel)] p-5 shadow-[var(--shadow-md)]">
+            <h2 className="text-base font-semibold text-[var(--color-text)]">合併資料夾發現同名項目</h2>
+            <p className="mt-2 text-sm text-[var(--color-text-muted)]">{folderMergePrompt.message}</p>
+            <div className="mt-3 max-h-36 overflow-y-auto rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel-2)] p-2 text-xs text-[var(--color-text-muted)]">
+              {folderMergePrompt.conflicts.slice(0, 8).map((conflict) => (
+                <div key={`${conflict.source_path}-${conflict.target_path}`} className="truncate">
+                  {conflict.name}
+                </div>
+              ))}
+              {folderMergePrompt.conflicts.length > 8 && (
+                <div>另有 {folderMergePrompt.conflicts.length - 8} 個同名項目…</div>
+              )}
+            </div>
+            <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+              「保留」會自動改名後合併；「略過」會保留同名項目在原資料夾，該來源資料夾不會刪除。
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => runFolderMerge(folderMergePrompt.paths, 'keep')}
+              >
+                保留
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => runFolderMerge(folderMergePrompt.paths, 'skip')}
+              >
+                略過
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setFolderMergePrompt(null)
+                  setStatus('已取消資料夾合併')
+                }}
+              >
+                取消
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   )

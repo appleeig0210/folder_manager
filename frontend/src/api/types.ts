@@ -76,4 +76,6 @@ export interface StatusResponse {
   ok: boolean
   renamed_paths?: string[] | null
   saved_path?: string | null
+  conflicts?: { source_path: string; target_path: string; name: string }[] | null
+  deleted_sources?: string[] | null
 }

@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from api.deps import get_ctx
-from api.schemas import FilterState, ImportTagsRequest, SetTagsRequest, StatusResponse, TagListResponse
+from api.schemas import DeleteTagsRequest, FilterState, ImportTagsRequest, SetTagsRequest, StatusResponse, TagListResponse
 
 router = APIRouter(prefix="/api/tags", tags=["tags"])
 
@@ -56,6 +56,21 @@ def add_tags(body: SetTagsRequest) -> StatusResponse:
     ctx = get_ctx()
     merged = ctx.tag_repo.add_tags(body.relative_key, body.tags)
     return StatusResponse(message=f"已添加標籤：{', '.join(merged)}")
+
+
+@router.post("/delete", response_model=TagListResponse)
+def delete_tags(body: DeleteTagsRequest) -> TagListResponse:
+    ctx = get_ctx()
+    tags = [tag.strip() for tag in body.tags if tag.strip()]
+    if not tags:
+        raise HTTPException(status_code=400, detail="請提供要刪除的標籤")
+    ctx.tag_repo.remove_tags_everywhere(tags)
+    deleted = {tag.casefold() for tag in tags}
+    ctx.selected_filter_tags = {
+        tag for tag in ctx.selected_filter_tags if tag.casefold() not in deleted
+    }
+    ctx.preview_service.clear_filter_cache()
+    return TagListResponse(all_tags=ctx.tag_repo.get_all_tags(), filter_state=_filter_state(ctx))
 
 
 @router.get("/export")
