@@ -88,3 +88,4 @@ jobs:
           path: |
             PeopleFolderManager-${{ matrix.package_label }}.zip
             src-tauri/target/release/bundle/dmg/*.dmg
+          retention-days: 1
