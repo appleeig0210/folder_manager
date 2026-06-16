@@ -389,7 +389,6 @@ class FileOperationsService:
         start_no: int,
         *,
         is_folder: bool,
-        allow_overwrite: bool = False,
     ) -> list[tuple[Path, Path]]:
         selected_set = {p.resolve() for p in old_paths}
         selected_parent_map: dict[Path, set[Path]] = {}
@@ -405,8 +404,6 @@ class FileOperationsService:
             while True:
                 candidate = (old.parent / f"{base}-{counter}{suffix}").resolve()
                 occupied_by_other = candidate.exists() and candidate not in selected_set
-                if allow_overwrite and not is_folder:
-                    occupied_by_other = False
                 occupied_in_plan = candidate in planned_targets
                 stem = candidate.stem
                 stem_conflict = False
@@ -421,7 +418,7 @@ class FileOperationsService:
                         s.is_file() and s.stem == stem and s.resolve() not in selected_in_parent for s in siblings
                     )
                     planned_same_stem = stem in planned_file_stems.get(old.parent, set())
-                    stem_conflict = planned_same_stem if allow_overwrite else existing_same_stem_other or planned_same_stem
+                    stem_conflict = existing_same_stem_other or planned_same_stem
                 if not occupied_by_other and not occupied_in_plan:
                     if not stem_conflict or (candidate == old and stem == old.stem):
                         plan.append((old, candidate))
@@ -440,16 +437,9 @@ class FileOperationsService:
                 counter += 1
         return plan
 
-    def apply_rename_plan(
-        self,
-        plan: list[tuple[Path, Path]],
-        *,
-        is_folder: bool,
-        allow_overwrite: bool = False,
-    ) -> list[tuple[str, str]]:
+    def apply_rename_plan(self, plan: list[tuple[Path, Path]], *, is_folder: bool) -> list[tuple[str, str]]:
         old_new_rel_pairs: list[tuple[str, str]] = []
         tmp_plan: list[tuple[Path, Path, Path]] = []
-        overwritten_plan: list[tuple[Path, Path]] = []
         touched_parents: set[Path] = set()
         try:
             for old, new in plan:
@@ -467,31 +457,7 @@ class FileOperationsService:
                 tmp = self._unique_temp_path(old)
                 old.rename(tmp)
                 tmp_plan.append((tmp, old, new))
-            tmp_paths = {tmp.resolve() for tmp, _old, _new in tmp_plan}
             for tmp, _old, new in tmp_plan:
-                if allow_overwrite and not is_folder:
-                    conflicts: list[Path] = []
-                    if new.exists() and new.resolve() not in tmp_paths:
-                        conflicts.append(new)
-                    try:
-                        conflicts.extend(
-                            sibling
-                            for sibling in new.parent.iterdir()
-                            if sibling.is_file()
-                            and sibling.stem == new.stem
-                            and sibling.resolve() != new.resolve()
-                            and sibling.resolve() not in tmp_paths
-                        )
-                    except OSError:
-                        pass
-                    for conflict in conflicts:
-                        if not conflict.exists():
-                            continue
-                        if not conflict.is_file():
-                            raise FileExistsError(f"目標不是檔案，無法覆蓋：{conflict}")
-                        backup = self._unique_temp_path(conflict)
-                        conflict.rename(backup)
-                        overwritten_plan.append((backup, conflict))
                 tmp.rename(new)
         except Exception as exc:
             for tmp, old, _new in reversed(tmp_plan):
@@ -500,19 +466,7 @@ class FileOperationsService:
                         tmp.rename(old)
                 except Exception:
                     pass
-            for backup, original in reversed(overwritten_plan):
-                try:
-                    if backup.exists() and not original.exists():
-                        backup.rename(original)
-                except Exception:
-                    pass
             raise exc
-        for backup, _original in overwritten_plan:
-            try:
-                if backup.exists():
-                    backup.unlink()
-            except Exception:
-                pass
         if is_folder:
             for old_rel, new_rel in old_new_rel_pairs:
                 if old_rel and new_rel:

@@ -185,16 +185,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ folder_paths, conflict_strategy }),
     }),
-  renameNumbered: (
-    paths: string[],
-    base: string,
-    start_no: number,
-    is_folder: boolean,
-    allow_overwrite = false,
-  ) =>
+  renameNumbered: (paths: string[], base: string, start_no: number, is_folder: boolean) =>
     request<StatusResponse>('/api/files/rename-numbered', {
       method: 'POST',
-      body: JSON.stringify({ paths, base, start_no, is_folder, allow_overwrite }),
+      body: JSON.stringify({ paths, base, start_no, is_folder }),
     }),
   reorder: (scope_path: string, kind: 'entries' | 'media', ordered_ids: string[]) =>
     request<StatusResponse>('/api/files/reorder', {

@@ -130,7 +130,6 @@ class NumberedRenameRequest(BaseModel):
     base: str
     start_no: int
     is_folder: bool
-    allow_overwrite: bool = False
 
 
 class ReorderRequest(BaseModel):
