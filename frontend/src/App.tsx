@@ -27,6 +27,12 @@ const DEFAULT_FILTER: FilterState = {
   sort_mode: 'name',
 }
 
+const THEME_STORAGE_KEY = 'people-folder-manager-theme'
+
+function getInitialDarkMode(): boolean {
+  return window.localStorage.getItem(THEME_STORAGE_KEY) === 'dark'
+}
+
 const filenameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
 type FolderMergeConflict = { source_path: string; target_path: string; name: string }
@@ -99,11 +105,11 @@ export default function App() {
   const [status, setStatus] = useState('就緒')
   const [allTags, setAllTags] = useState<string[]>([])
   const [filter, setFilter] = useState<FilterState>(DEFAULT_FILTER)
-  const [tagsExpanded, setTagsExpanded] = useState(true)
+  const [tagsExpanded, setTagsExpanded] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [anchorIndex, setAnchorIndex] = useState<number | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [darkMode, setDarkMode] = useState(false)
+  const [darkMode, setDarkMode] = useState(getInitialDarkMode)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; targetId: string } | null>(null)
   const [sidebarContextMenu, setSidebarContextMenu] = useState<{ x: number; y: number; paths: string[] } | null>(null)
@@ -127,8 +133,13 @@ export default function App() {
 
   const applyTheme = (dark: boolean) => {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+    window.localStorage.setItem(THEME_STORAGE_KEY, dark ? 'dark' : 'light')
     setDarkMode(dark)
   }
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light')
+  }, [darkMode])
 
   const refreshTree = useCallback(async () => {
     const nodes = await api.getTree()
@@ -392,13 +403,16 @@ export default function App() {
     const items: ContextMenuItem[] = []
 
     if (entry) {
+      const targetPaths =
+        selectedIds.has(entry.id) && selectedIds.size > 1 ? selectedPaths : [entry.path]
       items.push(
         { label: '新增資料夾…', onClick: () => promptCreateFolder(entry.path) },
         { separator: true, label: '', onClick: () => {} },
         { label: '添加標籤', onClick: () => promptAddTags(entry.relative_key) },
         { label: '打開目標資料夾', onClick: () => api.openPath(entry.path) },
         { label: '重新命名資料夾', onClick: () => promptRenameFolder(entry.path, entry.subfolder_name) },
-        { label: '轉移資料夾內容到…', onClick: () => promptTransfer([entry.path]) },
+        { label: targetPaths.length > 1 ? `序號命名已選取項目（${targetPaths.length}）` : '序號命名', onClick: () => promptRenameNumbered(targetPaths) },
+        { label: '轉移資料夾內容到…', onClick: () => promptTransfer(targetPaths) },
         { separator: true, label: '', onClick: () => {} },
         { label: '刪除資料夾', danger: true, onClick: () => confirmDeleteFolder(entry.path) },
       )
@@ -408,6 +422,7 @@ export default function App() {
       items.push(
         { label: '以程式開啟', onClick: () => api.openPath(mediaItem.path) },
         { label: '重新命名檔案', onClick: () => promptRenameFile(mediaItem.path) },
+        { label: targetPaths.length > 1 ? `序號命名已選取項目（${targetPaths.length}）` : '序號命名', onClick: () => promptRenameNumbered(targetPaths) },
         { label: '轉移已選取項目到…', onClick: () => promptTransfer(targetPaths) },
         { separator: true, label: '', onClick: () => {} },
         { label: '刪除檔案', danger: true, onClick: () => confirmDeleteFiles([mediaItem.path]) },
@@ -547,6 +562,56 @@ export default function App() {
     await reloadCurrentPreview()
   }
 
+  const promptRenameNumbered = async (paths: string[]) => {
+    if (!paths.length) return
+    const base = window.prompt('命名規則（例如 ABC）：')
+    if (!base) return
+    const startRaw = window.prompt('起始序號：', '1')
+    if (!startRaw) return
+    const startNo = parseInt(startRaw, 10)
+    if (!Number.isFinite(startNo)) {
+      setStatus('起始序號必須是數字')
+      return
+    }
+
+    const orderBeforeRename = (viewMode === 'entries' ? entries : media).map((item) => item.id)
+    const res = await api.renameNumbered(paths, base, startNo, viewMode === 'entries')
+    setThumbnailVersion((version) => version + 1)
+    if (filter.sort_mode === 'manual') {
+      const renamedIds = res.renamed_paths?.length
+        ? res.renamed_paths
+        : buildFallbackRenamedIds(paths, base, startNo, viewMode === 'entries')
+      const renameMap = new Map(paths.map((oldId, index) => [oldId, renamedIds[index] ?? oldId]))
+      if (viewMode === 'media') {
+        const target = getMediaReloadTarget()
+        const preview = target ? await loadMedia(target) : null
+        if (preview) {
+          const reordered = reorderRenamedItems(preview.items, orderBeforeRename, renameMap, (item) => item.name)
+          setMedia(reordered)
+          await api.reorder(preview.scope_path, 'media', reordered.map((item) => item.id))
+          setStatus(`${res.message}，已依序號更新手動排序`)
+          return
+        }
+      } else if (selectedTreePaths.length) {
+        const preview = await loadEntries(selectedTreePaths)
+        if (preview) {
+          const reordered = reorderRenamedItems(
+            preview.items,
+            orderBeforeRename,
+            renameMap,
+            (item) => item.subfolder_name,
+          )
+          setEntries(reordered)
+          await api.reorder(preview.scope_path, 'entries', reordered.map((item) => item.id))
+          setStatus(`${res.message}，已依序號更新手動排序`)
+          return
+        }
+      }
+    }
+    setStatus(res.message)
+    await reloadCurrentPreview()
+  }
+
   const promptTransfer = async (paths: string[]) => {
     let target = ''
     if (isTauriRuntime()) {
@@ -678,7 +743,7 @@ export default function App() {
         }
         breadcrumb={breadcrumb}
         scopeLabel={scopeLabel}
-        status={status}
+        status={loading ? `${status} · 載入中…` : status}
         rootFolder={config.root_folder}
         sidebarOpen={sidebarOpen}
         darkMode={darkMode}
@@ -713,10 +778,6 @@ export default function App() {
           onChange={(patch) => updateFilter(patch)}
           onApplyDuration={() => updateFilter({})}
         />
-        <div className="px-4 py-2 text-sm font-semibold text-[var(--color-text)] border-b border-[var(--color-border)] bg-[var(--color-panel-2)]">
-          {scopeLabel}
-          {loading && <span className="ml-2 text-xs font-normal text-[var(--color-text-muted)]">載入中…</span>}
-        </div>
         <PreviewGrid
           viewMode={viewMode}
           entries={entries}
@@ -774,54 +835,7 @@ export default function App() {
       <SelectionToolbar
         count={selectedIds.size}
         onTransfer={() => promptTransfer(selectedPaths)}
-        onRenameNumbered={async () => {
-          const base = window.prompt('命名規則（例如 ABC）：')
-          if (!base) return
-          const startRaw = window.prompt('起始序號：', '1')
-          if (!startRaw) return
-          const startNo = parseInt(startRaw, 10)
-          const orderBeforeRename = visibleItems.map((item) => item.id)
-          const res = await api.renameNumbered(
-            selectedPaths,
-            base,
-            startNo,
-            viewMode === 'entries',
-          )
-          setThumbnailVersion((version) => version + 1)
-          if (filter.sort_mode === 'manual') {
-            const renamedIds = res.renamed_paths?.length
-              ? res.renamed_paths
-              : buildFallbackRenamedIds(selectedPaths, base, startNo, viewMode === 'entries')
-            const renameMap = new Map(selectedPaths.map((oldId, index) => [oldId, renamedIds[index] ?? oldId]))
-            if (viewMode === 'media') {
-              const target = getMediaReloadTarget()
-              const preview = target ? await loadMedia(target) : null
-              if (preview) {
-                const reordered = reorderRenamedItems(preview.items, orderBeforeRename, renameMap, (item) => item.name)
-                setMedia(reordered)
-                await api.reorder(preview.scope_path, 'media', reordered.map((item) => item.id))
-                setStatus(`${res.message}，已依序號更新手動排序`)
-                return
-              }
-            } else if (selectedTreePaths.length) {
-              const preview = await loadEntries(selectedTreePaths)
-              if (preview) {
-                const reordered = reorderRenamedItems(
-                  preview.items,
-                  orderBeforeRename,
-                  renameMap,
-                  (item) => item.subfolder_name,
-                )
-                setEntries(reordered)
-                await api.reorder(preview.scope_path, 'entries', reordered.map((item) => item.id))
-                setStatus(`${res.message}，已依序號更新手動排序`)
-                return
-              }
-            }
-          }
-          setStatus(res.message)
-          await reloadCurrentPreview()
-        }}
+        onRenameNumbered={() => promptRenameNumbered(selectedPaths)}
         onAddTags={() => {
           const entry = entries.find((e) => selectedIds.has(e.id))
           if (entry) promptAddTags(entry.relative_key)

@@ -47,7 +47,7 @@ export function MediaFilterBar({ filter, viewMode, onChange, onApplyDuration }: 
             onChange={(e) =>
               onChange({ duration_min: e.target.value === '' ? null : Number(e.target.value) })
             }
-            className="w-14 h-8 px-2 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel)] text-sm"
+            className="w-20 h-8 px-2 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel)] text-sm"
           />
           <span className="text-[var(--color-text-muted)]">～</span>
           <input
@@ -58,7 +58,7 @@ export function MediaFilterBar({ filter, viewMode, onChange, onApplyDuration }: 
             onChange={(e) =>
               onChange({ duration_max: e.target.value === '' ? null : Number(e.target.value) })
             }
-            className="w-14 h-8 px-2 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel)] text-sm"
+            className="w-20 h-8 px-2 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel)] text-sm"
           />
           <Button size="sm" onClick={onApplyDuration}>
             套用

@@ -263,7 +263,7 @@ export function PreviewGrid({
   return (
     <div
       ref={parentRef}
-      className="relative flex-1 overflow-y-auto px-5 py-5"
+      className="relative flex-1 overflow-y-auto px-5 pt-3 pb-5"
       onDragOver={(e) => {
         if (!dragId) return
         e.preventDefault()

@@ -45,8 +45,8 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
             key={i}
             type="button"
             onClick={() => {
-              item.onClick()
               onClose()
+              window.setTimeout(item.onClick, 0)
             }}
             className={cn(
               'w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-panel-2)] transition-colors',
