@@ -252,9 +252,15 @@ def rename_numbered(body: NumberedRenameRequest) -> StatusResponse:
     else:
         if not ctx.file_ops.is_valid_file_stem(body.base):
             raise HTTPException(status_code=400, detail="命名規則無效")
-    plan = ctx.file_ops.build_numbered_plan(paths, body.base, body.start_no, is_folder=body.is_folder)
+    plan = ctx.file_ops.build_numbered_plan(
+        paths,
+        body.base,
+        body.start_no,
+        is_folder=body.is_folder,
+        allow_overwrite=body.allow_overwrite,
+    )
     try:
-        ctx.file_ops.apply_rename_plan(plan, is_folder=body.is_folder)
+        ctx.file_ops.apply_rename_plan(plan, is_folder=body.is_folder, allow_overwrite=body.allow_overwrite)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _sync_manual_order_after_rename(ctx.manual_entry_order, plan)

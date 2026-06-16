@@ -56,6 +56,28 @@ function buildFallbackRenamedIds(paths: string[], base: string, startNo: number,
   })
 }
 
+function getNameStem(name: string): string {
+  return name.replace(/\.[^.]+$/, '')
+}
+
+function getParentPath(path: string): string {
+  const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return separatorIndex < 0 ? '' : path.slice(0, separatorIndex)
+}
+
+function parseNumberedStem(stem: string): { base: string; no: number } | null {
+  const match = stem.match(/^(.*)-(\d+)$/)
+  if (!match) return null
+  const base = match[1].trim()
+  const no = parseInt(match[2], 10)
+  if (!base || !Number.isFinite(no)) return null
+  return { base, no }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function reorderRenamedItems<T extends { id: string }>(
   items: T[],
   orderBeforeRename: string[],
@@ -423,6 +445,8 @@ export default function App() {
         { label: '以程式開啟', onClick: () => api.openPath(mediaItem.path) },
         { label: '重新命名檔案', onClick: () => promptRenameFile(mediaItem.path) },
         { label: targetPaths.length > 1 ? `序號命名已選取項目（${targetPaths.length}）` : '序號命名', onClick: () => promptRenameNumbered(targetPaths) },
+        { label: '跟序命名', onClick: () => promptFollowRename(targetPaths) },
+        { label: '指定序號跟序命名', onClick: () => promptFollowRenameFromBase(targetPaths) },
         { label: '轉移已選取項目到…', onClick: () => promptTransfer(targetPaths) },
         { separator: true, label: '', onClick: () => {} },
         { label: '刪除檔案', danger: true, onClick: () => confirmDeleteFiles([mediaItem.path]) },
@@ -562,20 +586,38 @@ export default function App() {
     await reloadCurrentPreview()
   }
 
-  const promptRenameNumbered = async (paths: string[]) => {
-    if (!paths.length) return
-    const base = window.prompt('命名規則（例如 ABC）：')
-    if (!base) return
-    const startRaw = window.prompt('起始序號：', '1')
-    if (!startRaw) return
-    const startNo = parseInt(startRaw, 10)
-    if (!Number.isFinite(startNo)) {
-      setStatus('起始序號必須是數字')
-      return
-    }
+  const getMediaPathsInPreviewOrder = (paths: string[]) => {
+    const pathSet = new Set(paths.map(normalizeId))
+    const ordered = media.filter((item) => pathSet.has(normalizeId(item.path))).map((item) => item.path)
+    const orderedSet = new Set(ordered.map(normalizeId))
+    return [...ordered, ...paths.filter((path) => !orderedSet.has(normalizeId(path)))]
+  }
 
+  const confirmFollowRenameOverwrite = (paths: string[], base: string, startNo: number) => {
+    const selectedPathSet = new Set(paths.map(normalizeId))
+    const conflicts = paths.flatMap((path, index) => {
+      const targetStem = `${base}-${startNo + index}`
+      const parent = normalizeId(getParentPath(path))
+      return media
+        .filter(
+          (item) =>
+            !selectedPathSet.has(normalizeId(item.path)) &&
+            normalizeId(getParentPath(item.path)) === parent &&
+            getNameStem(item.name) === targetStem,
+        )
+        .map((item) => item.name)
+    })
+    const uniqueConflicts = Array.from(new Set(conflicts))
+    if (!uniqueConflicts.length) return true
+    const preview = uniqueConflicts.slice(0, 5).join('\n')
+    const more = uniqueConflicts.length > 5 ? `\n…另有 ${uniqueConflicts.length - 5} 個` : ''
+    return window.confirm(`以下檔名已存在，是否要覆蓋？\n\n${preview}${more}\n\n按「確定」覆蓋，按「取消」停止。`)
+  }
+
+  const runRenameNumbered = async (paths: string[], base: string, startNo: number, allowOverwrite = false) => {
+    if (!paths.length) return
     const orderBeforeRename = (viewMode === 'entries' ? entries : media).map((item) => item.id)
-    const res = await api.renameNumbered(paths, base, startNo, viewMode === 'entries')
+    const res = await api.renameNumbered(paths, base, startNo, viewMode === 'entries', allowOverwrite)
     setThumbnailVersion((version) => version + 1)
     if (filter.sort_mode === 'manual') {
       const renamedIds = res.renamed_paths?.length
@@ -610,6 +652,85 @@ export default function App() {
     }
     setStatus(res.message)
     await reloadCurrentPreview()
+  }
+
+  const promptRenameNumbered = async (paths: string[]) => {
+    if (!paths.length) return
+    const base = window.prompt('命名規則（例如 ABC）：')
+    if (!base) return
+    const startRaw = window.prompt('起始序號：', '1')
+    if (!startRaw) return
+    const startNo = parseInt(startRaw, 10)
+    if (!Number.isFinite(startNo)) {
+      setStatus('起始序號必須是數字')
+      return
+    }
+    await runRenameNumbered(paths, base, startNo)
+  }
+
+  const promptFollowRename = async (paths: string[]) => {
+    const orderedPaths = getMediaPathsInPreviewOrder(paths)
+    if (!orderedPaths.length) return
+    const pathSet = new Set(orderedPaths.map(normalizeId))
+    const firstIndex = media.findIndex((item) => pathSet.has(normalizeId(item.path)))
+    if (firstIndex <= 0) {
+      window.alert('選取範圍前方沒有可作為跟序基準的影片或圖片。')
+      return
+    }
+
+    const previousStem = getNameStem(media[firstIndex - 1].name)
+    const numbered = parseNumberedStem(previousStem)
+    const base = numbered?.base ?? previousStem
+    const startNo = numbered ? numbered.no + 1 : 1
+    if (!confirmFollowRenameOverwrite(orderedPaths, base, startNo)) return
+    await runRenameNumbered(orderedPaths, base, startNo, true)
+  }
+
+  const promptFollowRenameFromBase = async (paths: string[]) => {
+    const orderedPaths = getMediaPathsInPreviewOrder(paths)
+    if (!orderedPaths.length) return
+    const rawBase = window.prompt('輸入排序基準主檔名或序號檔名（例如 34 或 34-5）：')
+    const inputStem = rawBase ? getNameStem(rawBase.trim()) : ''
+    if (!inputStem) return
+    const specifiedNumbered = parseNumberedStem(inputStem)
+    const base = specifiedNumbered?.base ?? inputStem
+
+    const selectedPathSet = new Set(orderedPaths.map(normalizeId))
+    const pattern = new RegExp(`^${escapeRegExp(base)}-(\\d+)$`)
+    let lastNo: number | null = null
+    for (const item of media) {
+      if (selectedPathSet.has(normalizeId(item.path))) continue
+      const match = getNameStem(item.name).match(pattern)
+      if (!match) continue
+      const no = parseInt(match[1], 10)
+      if (Number.isFinite(no)) {
+        lastNo = Math.max(lastNo ?? no, no)
+      }
+    }
+
+    if (lastNo !== null) {
+      const startNo = lastNo + 1
+      if (!confirmFollowRenameOverwrite(orderedPaths, base, startNo)) return
+      await runRenameNumbered(orderedPaths, base, startNo, true)
+      return
+    }
+
+    const baseExists = media.some(
+      (item) => !selectedPathSet.has(normalizeId(item.path)) && getNameStem(item.name) === base,
+    )
+    if (baseExists) {
+      if (!confirmFollowRenameOverwrite(orderedPaths, base, 1)) return
+      await runRenameNumbered(orderedPaths, base, 1, true)
+      return
+    }
+
+    if (lastNo === null) {
+      const shouldContinue = window.confirm(`找不到「${base}」或「${base}-序號」的檔案。是否仍要從「${base}-1」開始命名？`)
+      if (!shouldContinue) return
+      if (!confirmFollowRenameOverwrite(orderedPaths, base, 1)) return
+      await runRenameNumbered(orderedPaths, base, 1, true)
+      return
+    }
   }
 
   const promptTransfer = async (paths: string[]) => {
