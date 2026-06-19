@@ -651,6 +651,16 @@ export default function App() {
 
   const confirmDeleteFiles = async (paths: string[]) => {
     if (!window.confirm(`確定刪除 ${paths.length} 個檔案？`)) return
+    const deletedPaths = new Set(paths.map(normalizeId))
+    setMedia((current) => {
+      const next = current.filter((item) => !deletedPaths.has(normalizeId(item.path)))
+      setLightboxIndex((idx) => {
+        if (idx === null) return null
+        if (!next.length) return null
+        return Math.min(idx, next.length - 1)
+      })
+      return next
+    })
     const res = await api.deleteFiles(paths)
     setThumbnailVersion((version) => version + 1)
     setStatus(res.message)

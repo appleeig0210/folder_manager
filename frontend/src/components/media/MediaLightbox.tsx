@@ -10,6 +10,13 @@ import { getVideoPlaybackModeInfo, playbackModeBadgeClass } from '../../lib/play
 import { WebVideoNotice } from './WebVideoNotice'
 import { MpvVideoSurface } from './MpvVideoSurface'
 import { disposeVideoElement } from './videoUtils'
+import {
+  coarseScrubProgress,
+  fineScrubProgress,
+  readRangeSeconds,
+  shouldHandleScrubPointerMove,
+  syncScrubRangeVisual,
+} from './videoScrub'
 import { Button } from '../ui/Button'
 
 const VIDEO_SEEK_STEP_SECONDS = 1 / 30
@@ -473,8 +480,11 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     resumeAfterScrubRef.current = false
   }, [applySeek, stopCoarsePreview, stopFinePreview])
 
-  const previewCoarseSeek = useCallback((seconds: number) => {
+  const previewCoarseSeek = useCallback((seconds: number, input?: HTMLInputElement | null) => {
     syncScrubDraft(seconds)
+    if (input) {
+      syncScrubRangeVisual(input, coarseScrubProgress(seconds, videoDuration))
+    }
     pendingCoarseSeekRef.current = seconds
 
     const elapsed = performance.now() - lastCoarsePreviewAtRef.current
@@ -483,18 +493,21 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       return
     }
     scheduleCoarsePreview()
-  }, [flushCoarsePreview, scheduleCoarsePreview, syncScrubDraft])
+  }, [flushCoarsePreview, scheduleCoarsePreview, syncScrubDraft, videoDuration])
 
   const handleScrubPointerMove = useCallback((
     event: React.PointerEvent<HTMLInputElement>,
-    preview: (seconds: number) => void,
+    preview: (seconds: number, input: HTMLInputElement) => void,
   ) => {
-    if (event.buttons === 0) return
-    preview(Number(event.currentTarget.value))
+    if (!shouldHandleScrubPointerMove(event, scrubbingRef.current)) return
+    preview(readRangeSeconds(event), event.currentTarget)
   }, [])
 
-  const previewFineSeek = useCallback((seconds: number) => {
+  const previewFineSeek = useCallback((seconds: number, input?: HTMLInputElement | null) => {
     syncScrubDraft(seconds)
+    if (input) {
+      syncScrubRangeVisual(input, fineScrubProgress(seconds, fineSeekStart, fineSeekEnd))
+    }
     pendingFineSeekRef.current = seconds
 
     const elapsed = performance.now() - lastFinePreviewAtRef.current
@@ -503,7 +516,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       return
     }
     scheduleFinePreview()
-  }, [flushFinePreview, scheduleFinePreview, syncScrubDraft])
+  }, [fineSeekEnd, fineSeekStart, flushFinePreview, scheduleFinePreview, syncScrubDraft])
 
   const seekVideo = useCallback((direction: -1 | 1, seconds: number) => {
     if (!item || item.media_type !== 'video' || seekingRef.current || scrubbingRef.current) return
@@ -962,13 +975,12 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                           event.currentTarget.releasePointerCapture(event.pointerId)
                         }
-                        finishScrub(Number(event.currentTarget.value))
+                        finishScrub(readRangeSeconds(event))
                       }}
                       onPointerCancel={(event) => {
-                        finishScrub(Number(event.currentTarget.value))
+                        finishScrub(readRangeSeconds(event))
                       }}
-                      onInput={(event) => previewCoarseSeek(Number(event.currentTarget.value))}
-                      onChange={(event) => previewCoarseSeek(Number(event.currentTarget.value))}
+                      onInput={(event) => previewCoarseSeek(readRangeSeconds(event), event.currentTarget)}
                       className="video-scrub-range w-full"
                       aria-label="全片時間軸"
                     />
@@ -1029,13 +1041,12 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                         event.currentTarget.releasePointerCapture(event.pointerId)
                       }
-                      finishScrub(Number(event.currentTarget.value))
+                      finishScrub(readRangeSeconds(event))
                     }}
                     onPointerCancel={(event) => {
-                      finishScrub(Number(event.currentTarget.value))
+                      finishScrub(readRangeSeconds(event))
                     }}
-                    onInput={(event) => previewFineSeek(Number(event.currentTarget.value))}
-                    onChange={(event) => previewFineSeek(Number(event.currentTarget.value))}
+                    onInput={(event) => previewFineSeek(readRangeSeconds(event), event.currentTarget)}
                     className="video-scrub-range video-scrub-range--fine w-full"
                     aria-label="精細調整影片時間"
                   />

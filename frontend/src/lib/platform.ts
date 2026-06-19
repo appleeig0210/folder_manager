@@ -51,6 +51,16 @@ const DESKTOP_LOCAL_SCRUB_PROFILE: VideoScrubProfile = {
   showNativeControls: false,
 }
 
+/** macOS WKWebView 的 asset 播放 seek 需更頻繁同步，避免受控 range 與影片時間打架。 */
+const DESKTOP_MAC_ASSET_SCRUB_PROFILE: VideoScrubProfile = {
+  coarsePreviewMs: 16,
+  finePreviewMs: 16,
+  minDeltaSeconds: 0.008,
+  waitForSeeked: false,
+  preload: 'auto',
+  showNativeControls: false,
+}
+
 const DESKTOP_HTTP_SCRUB_PROFILE: VideoScrubProfile = {
   coarsePreviewMs: 100,
   finePreviewMs: 100,
@@ -101,9 +111,16 @@ export function shouldProbeNativeMpv(): boolean {
   return supportsMpvEmbed()
 }
 
+function isMacDesktopApp(): boolean {
+  if (!isDesktopApp()) return false
+  return /Mac|iPhone|iPad|iPod/.test(navigator.userAgent)
+}
+
 export function getVideoScrubProfile(playback: MediaPlaybackSource | null): VideoScrubProfile {
   if (!isDesktopApp()) return WEB_SCRUB_PROFILE
-  if (playback?.via === 'asset') return DESKTOP_LOCAL_SCRUB_PROFILE
+  if (playback?.via === 'asset') {
+    return isMacDesktopApp() ? DESKTOP_MAC_ASSET_SCRUB_PROFILE : DESKTOP_LOCAL_SCRUB_PROFILE
+  }
   return DESKTOP_HTTP_SCRUB_PROFILE
 }
 

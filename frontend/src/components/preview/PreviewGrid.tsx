@@ -69,6 +69,7 @@ export function PreviewGrid({
   const rowHeight = viewMode === 'entries' ? ENTRY_HEIGHT : MEDIA_HEIGHT
   const isDraggingSelectedGroup = dragId !== null && selectedIds.has(dragId) && selectedIds.size > 1
   const nativeFileDragEnabled = supportsNativeFileDrag()
+  const listSignature = useMemo(() => items.map((item) => item.id).join('\0'), [items])
 
   useLayoutEffect(() => {
     const parent = parentRef.current
@@ -151,6 +152,16 @@ export function PreviewGrid({
     estimateSize: () => rowHeight,
     overscan: 2,
   })
+
+  useLayoutEffect(() => {
+    rowVirtualizer.measure()
+    const parent = parentRef.current
+    if (!parent) return
+    const maxScrollTop = Math.max(0, rowVirtualizer.getTotalSize() - parent.clientHeight)
+    if (parent.scrollTop > maxScrollTop) {
+      parent.scrollTop = maxScrollTop
+    }
+  }, [listSignature, columnCount, rowCount, rowHeight, rowVirtualizer])
 
   const getDropPosition = (event: React.DragEvent<HTMLElement>): 'before' | 'after' => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -287,13 +298,17 @@ export function PreviewGrid({
           }}
         />
       )}
-      <div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
+      <div
+        key={listSignature}
+        style={{ height: rowVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}
+      >
         {rowVirtualizer.getVirtualItems().map((virtualRow) => {
           const startIdx = virtualRow.index * columnCount
           const rowItems = items.slice(startIdx, startIdx + columnCount)
+          const rowSignature = rowItems.map((entry) => entry.id).join('\0')
           return (
             <div
-              key={virtualRow.key}
+              key={`${listSignature}:${virtualRow.index}:${rowSignature}`}
               className="absolute left-0 w-full grid gap-4 px-1 py-2 overflow-visible"
               style={{
                 top: virtualRow.start,

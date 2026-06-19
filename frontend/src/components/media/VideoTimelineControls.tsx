@@ -1,4 +1,10 @@
-import { memo, type CSSProperties } from 'react'
+import { memo, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  readRangeSeconds,
+  syncScrubRangeVisual,
+  coarseScrubProgress,
+  fineScrubProgress,
+} from './videoScrub'
 
 export const FINE_SEEK_WINDOW_SECONDS = 4
 export const FINE_SEEK_STEP_SECONDS = 1 / 60
@@ -35,8 +41,8 @@ export interface VideoTimelineControlsProps {
   onPreviewFineSeek: (seconds: number) => void
   onFinishScrub: (seconds: number) => void
   onScrubPointerMove: (
-    event: React.PointerEvent<HTMLInputElement>,
-    preview: (seconds: number) => void,
+    event: ReactPointerEvent<HTMLInputElement>,
+    preview: (seconds: number, input: HTMLInputElement) => void,
   ) => void
   onSeekVideoTo: (seconds: number) => void
   readVideoTime: () => number
@@ -99,13 +105,16 @@ export const VideoTimelineControls = memo(function VideoTimelineControls({
                   if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                     event.currentTarget.releasePointerCapture(event.pointerId)
                   }
-                  onFinishScrub(Number(event.currentTarget.value))
+                  onFinishScrub(readRangeSeconds(event))
                 }}
                 onPointerCancel={(event) => {
-                  onFinishScrub(Number(event.currentTarget.value))
+                  onFinishScrub(readRangeSeconds(event))
                 }}
-                onInput={(event) => onPreviewCoarseSeek(Number(event.currentTarget.value))}
-                onChange={(event) => onPreviewCoarseSeek(Number(event.currentTarget.value))}
+                onInput={(event) => {
+                  const seconds = readRangeSeconds(event)
+                  syncScrubRangeVisual(event.currentTarget, coarseScrubProgress(seconds, videoDuration))
+                  onPreviewCoarseSeek(seconds)
+                }}
                 className="video-scrub-range w-full"
                 aria-label="全片時間軸"
               />
@@ -166,13 +175,16 @@ export const VideoTimelineControls = memo(function VideoTimelineControls({
                   if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                     event.currentTarget.releasePointerCapture(event.pointerId)
                   }
-                  onFinishScrub(Number(event.currentTarget.value))
+                  onFinishScrub(readRangeSeconds(event))
                 }}
                 onPointerCancel={(event) => {
-                  onFinishScrub(Number(event.currentTarget.value))
+                  onFinishScrub(readRangeSeconds(event))
                 }}
-                onInput={(event) => onPreviewFineSeek(Number(event.currentTarget.value))}
-                onChange={(event) => onPreviewFineSeek(Number(event.currentTarget.value))}
+                onInput={(event) => {
+                  const seconds = readRangeSeconds(event)
+                  syncScrubRangeVisual(event.currentTarget, fineScrubProgress(seconds, fineSeekStart, fineSeekEnd))
+                  onPreviewFineSeek(seconds)
+                }}
                 className="video-scrub-range video-scrub-range--fine w-full"
                 aria-label="精細調整影片時間"
               />
