@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['api.deps', 'api.routes.config', 'api.routes.tree', 'api.routes.preview', 'api.routes.thumbnails', 'api.routes.tags', 'api.routes.files']
+hiddenimports = ['api.deps', 'api.routes.config', 'api.routes.tree', 'api.routes.preview', 'api.routes.thumbnails', 'api.routes.tags', 'api.routes.files', 'media_keyword_service', 'folder_tags_migration']
 hiddenimports += collect_submodules('uvicorn')
 
 

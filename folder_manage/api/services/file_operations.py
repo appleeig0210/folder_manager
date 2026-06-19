@@ -7,15 +7,13 @@ from typing import Optional
 import re
 
 from people_data_store import PeopleDataStore
-from tag_repository import TagRepository
 
 
 class FileOperationsService:
     INVALID_CHARS = {'\\', '/', ':', '*', '?', '"', '<', '>', '|'}
 
-    def __init__(self, store: PeopleDataStore, tag_repo: TagRepository):
+    def __init__(self, store: PeopleDataStore):
         self.store = store
-        self.tag_repo = tag_repo
 
     @classmethod
     def is_valid_folder_basename(cls, name: str) -> bool:
@@ -132,17 +130,7 @@ class FileOperationsService:
         new_path = folder.parent / new_name
         if new_path.exists():
             raise FileExistsError("已存在相同名稱的項目")
-        try:
-            old_rel = self.store.to_relative_key(folder)
-        except Exception:
-            old_rel = ""
         folder.rename(new_path)
-        try:
-            new_rel = self.store.to_relative_key(new_path)
-        except Exception:
-            new_rel = ""
-        if old_rel and new_rel:
-            self.tag_repo.rename_relative_path_root(old_rel, new_rel)
         self.store.clear_cache()
         return new_path
 
@@ -167,14 +155,7 @@ class FileOperationsService:
         folder = Path(folder_path).resolve()
         if root and folder == Path(root).resolve():
             raise ValueError("不可刪除主資料夾")
-        file_count = self.store.delete_folder(folder)
-        try:
-            relative_prefix = self.store.to_relative_key(folder)
-        except Exception:
-            relative_prefix = ""
-        if relative_prefix:
-            self.tag_repo.remove_keys_by_prefix(relative_prefix)
-        return file_count
+        return self.store.delete_folder(folder)
 
     def delete_files(self, file_paths: list[Path]) -> tuple[int, int]:
         deleted = 0
@@ -199,19 +180,6 @@ class FileOperationsService:
         src = Path(source_folder).resolve()
         dst = Path(target_folder).resolve()
         moved_count, renamed_count, source_deleted = self.store.move_folder_content_and_remove_source(src, dst)
-        try:
-            relative_key = self.store.to_relative_key(src)
-        except Exception:
-            relative_key = ""
-        if relative_key:
-            source_tags = self.tag_repo.get_tags(relative_key)
-            self.tag_repo.remove_key(relative_key)
-            try:
-                target_key = self.store.to_relative_key(dst)
-            except Exception:
-                target_key = ""
-            if source_tags and target_key:
-                self.tag_repo.set_tags(target_key, self.tag_repo.get_tags(target_key) + source_tags)
         return {
             "moved_count": moved_count,
             "renamed_count": renamed_count,
@@ -300,15 +268,6 @@ class FileOperationsService:
                 occupied.setdefault(relative, kind)
         return conflicts
 
-    def _merge_folder_tags(self, old_folder: Path, new_folder: Path) -> None:
-        try:
-            old_rel = self.store.to_relative_key(old_folder)
-            new_rel = self.store.to_relative_key(new_folder)
-        except Exception:
-            return
-        if old_rel and new_rel:
-            self.tag_repo.rename_relative_path_root(old_rel, new_rel)
-
     def merge_selected_folders(self, folder_paths: list[Path], conflict_strategy: str) -> dict:
         if conflict_strategy not in {"keep", "skip"}:
             raise ValueError("衝突處理策略無效")
@@ -330,7 +289,6 @@ class FileOperationsService:
                     if not candidate.exists():
                         shutil.move(str(item), str(candidate))
                         moved_count += self._count_files(candidate)
-                        self._merge_folder_tags(item, candidate)
                         continue
 
                     if candidate.is_dir():
@@ -345,7 +303,6 @@ class FileOperationsService:
                     shutil.move(str(item), str(renamed_target))
                     moved_count += self._count_files(renamed_target)
                     renamed_count += 1
-                    self._merge_folder_tags(item, renamed_target)
                     continue
 
                 if not item.is_file():
@@ -363,7 +320,6 @@ class FileOperationsService:
 
             try:
                 source_dir.rmdir()
-                self._merge_folder_tags(source_dir, target_dir)
             except OSError:
                 pass
 
@@ -438,7 +394,6 @@ class FileOperationsService:
         return plan
 
     def apply_rename_plan(self, plan: list[tuple[Path, Path]], *, is_folder: bool) -> list[tuple[str, str]]:
-        old_new_rel_pairs: list[tuple[str, str]] = []
         tmp_plan: list[tuple[Path, Path, Path]] = []
         touched_parents: set[Path] = set()
         try:
@@ -447,13 +402,6 @@ class FileOperationsService:
                     continue
                 touched_parents.add(old.parent)
                 touched_parents.add(new.parent)
-                if is_folder:
-                    try:
-                        old_rel = self.store.to_relative_key(old)
-                        new_rel = self.store.to_relative_key(new)
-                        old_new_rel_pairs.append((old_rel, new_rel))
-                    except Exception:
-                        pass
                 tmp = self._unique_temp_path(old)
                 old.rename(tmp)
                 tmp_plan.append((tmp, old, new))
@@ -468,14 +416,11 @@ class FileOperationsService:
                     pass
             raise exc
         if is_folder:
-            for old_rel, new_rel in old_new_rel_pairs:
-                if old_rel and new_rel:
-                    self.tag_repo.rename_relative_path_root(old_rel, new_rel)
             self.store.clear_cache()
         else:
             for parent in touched_parents:
                 self.store.invalidate_folder_cache(parent)
-        return old_new_rel_pairs
+        return []
 
     def open_path_external(self, path: Path) -> None:
         import subprocess

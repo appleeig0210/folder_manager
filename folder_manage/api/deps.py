@@ -11,8 +11,9 @@ from api.services.scan_coordinator import ScanCoordinator
 from api.services.thumbnail_service import ThumbnailService
 from api.services.tree_service import TreeService
 from app_paths import get_config_path
+from folder_tags_migration import migrate_folder_tags_if_needed
+from media_keyword_service import MediaKeywordService
 from people_data_store import PeopleDataStore
-from tag_repository import TagRepository
 
 
 class AppContext:
@@ -20,12 +21,12 @@ class AppContext:
         self.config_path = get_config_path(APP_NAME)
         self.config = self._load_config()
         self.store = PeopleDataStore()
-        self.tag_repo = TagRepository(APP_NAME)
+        self.keyword_service = MediaKeywordService()
         self.thumbnail_service = ThumbnailService(APP_NAME)
         self.scan_coordinator = ScanCoordinator()
-        self.preview_service = PreviewService(self.store, self.tag_repo, self.thumbnail_service)
-        self.tree_service = TreeService(self.store, self.tag_repo, self.preview_service)
-        self.file_ops = FileOperationsService(self.store, self.tag_repo)
+        self.preview_service = PreviewService(self.store, self.keyword_service, self.thumbnail_service)
+        self.tree_service = TreeService(self.store, self.preview_service)
+        self.file_ops = FileOperationsService(self.store)
 
         self.selected_filter_tags: set[str] = set()
         self.filter_media_video = False
@@ -35,8 +36,10 @@ class AppContext:
         self.preview_sort_mode = "name"
         self.manual_entry_order: dict[str, list[str]] = {}
         self.manual_media_order: dict[str, list[str]] = {}
+        self.migration_message: Optional[str] = None
 
         self._apply_saved_root()
+        self._run_folder_tags_migration()
 
     def _load_config(self) -> dict:
         default = {"root_folder": "", "tree_child_order": {}}
@@ -62,6 +65,12 @@ class AppContext:
         root_path = Path(root_folder)
         if root_path.exists() and root_path.is_dir():
             self.store.set_root_folder(root_path)
+
+    def _run_folder_tags_migration(self) -> None:
+        try:
+            self.migration_message = migrate_folder_tags_if_needed(self.store, self.keyword_service)
+        except Exception:
+            self.migration_message = None
 
     def shutdown(self) -> None:
         self.thumbnail_service.flush_disk_index()

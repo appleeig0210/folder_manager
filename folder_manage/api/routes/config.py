@@ -17,6 +17,7 @@ def get_config() -> ConfigResponse:
     return ConfigResponse(
         root_folder=str(root) if root else "",
         has_root=root is not None,
+        migration_message=ctx.migration_message,
     )
 
 

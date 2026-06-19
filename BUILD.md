@@ -10,6 +10,7 @@
 - Node.js 20+
 - Rust 1.77+ — Tauri 桌面版需要
 - （可選）mpv — B2 內嵌影片播放，見 `scripts/install_mpv.ps1`
+- **ExifTool** — 媒體檔 Keywords 讀寫。開發時可安裝並加入 PATH；正式打包時 `npm run sidecar:win` / `sidecar:mac` 會一併下載至 `src-tauri/bin/exiftool/`，並複製到 sidecar 同目錄。
 
 ## 快速開始（桌面版 · 推薦）
 
@@ -104,8 +105,10 @@ python people_folder_manager.py
 | `GET /api/tree` | 樹狀結構 |
 | `GET /api/preview/entries` | 子資料夾預覽 |
 | `GET /api/preview/media` | 媒體預覽 |
+| `GET /api/preview/tagged-media` | 標籤篩選媒體（依左側選取範圍） |
 | `GET /api/thumbnails/entry` | 子資料夾縮圖 |
 | `PATCH /api/tags/filter` | 篩選與排序 |
+| `POST /api/tags/invalidate` | 清除媒體標籤快取 |
 | `POST /api/files/*` | 檔案操作 |
 
 ## 手動測試清單（桌面版）
@@ -115,7 +118,8 @@ python people_folder_manager.py
 - [ ] 子資料夾卡片預覽與雙擊進入媒體
 - [ ] 影片 lightbox：標籤顯示 `mpv 內嵌` 或 `本地 asset`
 - [ ] 全片 / 精細拖動條可操作，關閉 lightbox 與應用不卡住
-- [ ] 標籤 OR 篩選、媒體類型篩選
+- [ ] 標籤 OR 篩選（左側樹 + 右側媒體）、媒體類型篩選
+- [ ] 媒體右鍵添加 Keywords，移動後標籤仍保留
 - [ ] 多選與批次轉移/刪除
 - [ ] 原生拖出檔案（Tauri）
 - [ ] 標籤 JSON/CSV 匯入匯出

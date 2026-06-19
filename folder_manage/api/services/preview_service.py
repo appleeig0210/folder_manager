@@ -5,24 +5,26 @@ from pathlib import Path
 from typing import Optional
 
 from api.services.thumbnail_service import ThumbnailService
+from media_keyword_service import MediaKeywordService
 from people_data_store import MediaItem, PeopleDataStore, SubfolderEntry
-from tag_repository import TagRepository
 
 
 class PreviewService:
     def __init__(
         self,
         store: PeopleDataStore,
-        tag_repo: TagRepository,
+        keyword_service: MediaKeywordService,
         thumbnail_service: ThumbnailService,
     ):
         self.store = store
-        self.tag_repo = tag_repo
+        self.keyword_service = keyword_service
         self.thumbnail_service = thumbnail_service
         self._folder_media_filter_cache: dict[tuple[str, str], bool] = {}
+        self._folder_tag_filter_cache: dict[tuple[str, str], bool] = {}
 
     def clear_filter_cache(self) -> None:
         self._folder_media_filter_cache.clear()
+        self._folder_tag_filter_cache.clear()
 
     @staticmethod
     def preview_name_sort_key(name: str) -> tuple[int, tuple[tuple[int, object], ...], str]:
@@ -72,13 +74,46 @@ class PreviewService:
             return sorted(items, key=key)
         return sorted(items, key=lambda m: self.preview_name_sort_key(m.media_path.name))
 
-    def relative_key_matches_tag_filter(self, relative_key: str, selected_tags: set[str]) -> bool:
+    def media_matches_tag_filter(self, path: Path, selected_tags: set[str]) -> bool:
         if not selected_tags:
             return True
-        if not relative_key:
+        file_tags = set(self.keyword_service.get_keywords(path))
+        return bool(file_tags.intersection(selected_tags))
+
+    def folder_contains_tagged_media(self, folder: Path, selected_tags: set[str]) -> bool:
+        if not selected_tags:
+            return True
+        signature = "|".join(sorted(selected_tags, key=str.casefold))
+        cache_key = (str(folder.resolve()), signature)
+        cached = self._folder_tag_filter_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        items = self.store.list_media_items(folder)
+        if not items:
+            self._folder_tag_filter_cache[cache_key] = False
             return False
-        eff = set(self.tag_repo.get_effective_tags(relative_key))
-        return bool(eff.intersection(selected_tags))
+
+        keywords_map = self.keyword_service.read_keywords_batch([item.media_path for item in items])
+        matched = False
+        for item in items:
+            tags = set(keywords_map.get(str(item.media_path.resolve()), []))
+            if tags.intersection(selected_tags):
+                matched = True
+                break
+        self._folder_tag_filter_cache[cache_key] = matched
+        return matched
+
+    def filter_media_by_tags(self, items: list[MediaItem], selected_tags: set[str]) -> list[MediaItem]:
+        if not selected_tags:
+            return list(items)
+        keywords_map = self.keyword_service.read_keywords_batch([item.media_path for item in items])
+        result: list[MediaItem] = []
+        for item in items:
+            tags = set(keywords_map.get(str(item.media_path.resolve()), []))
+            if tags.intersection(selected_tags):
+                result.append(item)
+        return result
 
     @staticmethod
     def duration_filter_enabled(lo_min: Optional[float], hi_min: Optional[float]) -> bool:
@@ -149,33 +184,82 @@ class PreviewService:
             if self.media_item_matches_filter(m, True, True, lo_min, hi_min)
         ]
 
+    def apply_media_filters(
+        self,
+        items: list[MediaItem],
+        selected_tags: set[str],
+        want_video: bool,
+        want_image: bool,
+        lo_min: Optional[float],
+        hi_min: Optional[float],
+    ) -> list[MediaItem]:
+        filtered = self.filter_media_by_tags(items, selected_tags)
+        filtered = self.filter_media_by_type(filtered, want_video, want_image)
+        return self.filter_items_by_duration(filtered, lo_min, hi_min)
+
     def scan_media_for_preview(
         self,
         folder: Path,
+        selected_tags: set[str],
         want_video: bool,
         want_image: bool,
         lo_min: Optional[float],
         hi_min: Optional[float],
     ) -> tuple[list[MediaItem], list[MediaItem]]:
         raw = self.store.list_media_items(folder)
-        typed = self.filter_media_by_type(raw, want_video, want_image)
-        if lo_min is None and hi_min is None:
-            return raw, typed
-        return raw, self.filter_items_by_duration(typed, lo_min, hi_min)
+        display = self.apply_media_filters(raw, selected_tags, want_video, want_image, lo_min, hi_min)
+        return raw, display
+
+    def scan_tagged_media_in_scope(
+        self,
+        scope_paths: list[Path],
+        selected_tags: set[str],
+        want_video: bool,
+        want_image: bool,
+        lo_min: Optional[float],
+        hi_min: Optional[float],
+    ) -> list[MediaItem]:
+        combined: list[MediaItem] = []
+        seen: set[str] = set()
+        for folder in scope_paths:
+            folder = Path(folder).resolve()
+            if not folder.is_dir():
+                continue
+            _, display = self.scan_media_for_preview(
+                folder,
+                selected_tags,
+                want_video,
+                want_image,
+                lo_min,
+                hi_min,
+            )
+            for item in display:
+                key = str(item.media_path.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                combined.append(item)
+        return combined
 
     def apply_media_entry_filter(
         self,
         entries: list[SubfolderEntry],
+        selected_tags: set[str],
         lo_min: Optional[float],
         hi_min: Optional[float],
         want_video: bool,
         want_image: bool,
     ) -> list[SubfolderEntry]:
+        filtered = entries
+        if selected_tags:
+            filtered = [
+                e for e in filtered if self.folder_contains_tagged_media(e.subfolder_path, selected_tags)
+            ]
         if not want_video and not want_image and not self.duration_filter_enabled(lo_min, hi_min):
-            return entries
+            return filtered
         return [
             e
-            for e in entries
+            for e in filtered
             if self.folder_matches_active_media_filter(e.subfolder_path, lo_min, hi_min, want_video, want_image)
         ]
 
@@ -190,3 +274,6 @@ class PreviewService:
             preview_type=preview_type,
             media_count=media_count,
         )
+
+    def get_media_tags_map(self, items: list[MediaItem]) -> dict[str, list[str]]:
+        return self.keyword_service.media_items_with_tags(self.store, items)

@@ -122,21 +122,27 @@ export const api = {
     request<{ queued: boolean }>(`/api/thumbnails/streamable/prepare?token=${encodePathToken(path)}`, {
       method: 'POST',
     }),
+  getTaggedMedia: (paths: string[]) => {
+    const qs = paths.map((p) => `paths=${encodeURIComponent(p)}`).join('&')
+    return request<PreviewMediaResponse>(`/api/preview/tagged-media?${qs}`)
+  },
+  invalidateTagCache: () =>
+    request<StatusResponse>('/api/tags/invalidate', { method: 'POST' }),
   getTags: () => request<TagListResponse>('/api/tags'),
   updateFilter: (state: FilterState) =>
     request<TagListResponse>('/api/tags/filter', {
       method: 'PATCH',
       body: JSON.stringify(state),
     }),
-  setTags: (relative_key: string, tags: string[]) =>
+  setTags: (paths: string[], tags: string[]) =>
     request<StatusResponse>('/api/tags/set', {
       method: 'POST',
-      body: JSON.stringify({ relative_key, tags }),
+      body: JSON.stringify({ paths, tags }),
     }),
-  addTags: (relative_key: string, tags: string[]) =>
+  addTags: (paths: string[], tags: string[]) =>
     request<StatusResponse>('/api/tags/add', {
       method: 'POST',
-      body: JSON.stringify({ relative_key, tags }),
+      body: JSON.stringify({ paths, tags }),
     }),
   deleteTags: (tags: string[]) =>
     request<TagListResponse>('/api/tags/delete', {

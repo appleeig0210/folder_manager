@@ -41,6 +41,7 @@ export function MediaCard({
 }: MediaCardProps) {
   const [loadedSrc, setLoadedSrc] = useState<string | null>(null)
   const canNativeDrag = Boolean(nativeDragPaths?.length)
+  const tags = item.tags.length ? item.tags.join(', ') : '（尚未標籤）'
   const thumbnailSrc = api.mediaThumbUrl(item.path, item.media_type, thumbnailVersion)
   const loaded = loadedSrc === thumbnailSrc
 
@@ -129,6 +130,9 @@ export function MediaCard({
       <div className="p-3 pt-2 flex flex-col gap-1">
         <p className="text-sm font-semibold truncate" title={item.name}>
           {item.name}
+        </p>
+        <p className="text-xs text-[var(--color-text-muted)] truncate" title={tags}>
+          標籤：{tags}
         </p>
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs text-[var(--color-text-muted)] truncate">

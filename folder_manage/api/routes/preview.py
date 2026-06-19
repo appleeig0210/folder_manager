@@ -13,7 +13,7 @@ from people_data_store import SubfolderEntry
 router = APIRouter(prefix="/api/preview", tags=["preview"])
 
 
-def _entry_to_item(ctx, entry: SubfolderEntry) -> EntryItem:
+def _entry_to_item(entry: SubfolderEntry) -> EntryItem:
     return EntryItem(
         id=str(entry.subfolder_path.resolve()),
         person_name=entry.person_name,
@@ -23,15 +23,25 @@ def _entry_to_item(ctx, entry: SubfolderEntry) -> EntryItem:
         preview_path=str(entry.preview_path.resolve()) if entry.preview_path else None,
         preview_type=entry.preview_type,
         media_count=entry.media_count,
-        tags=ctx.tag_repo.get_effective_tags(entry.relative_key),
     )
 
 
-def _apply_manual_order(ids: list[str], order: list[str]) -> list[str]:
-    if not order:
-        return ids
-    index = {k: i for i, k in enumerate(order)}
-    return sorted(ids, key=lambda x: (index.get(x, 10_000), x.casefold()))
+def _media_to_item(ctx, media_path: Path, media_type: str, tags: list[str]) -> MediaItemResponse:
+    duration = None
+    duration_label = None
+    if media_type == "video":
+        duration = ctx.thumbnail_service.get_video_duration_seconds(media_path)
+        if duration is not None:
+            duration_label = ThumbnailService.format_video_duration(duration)
+    return MediaItemResponse(
+        id=str(media_path.resolve()),
+        path=str(media_path.resolve()),
+        name=media_path.name,
+        media_type=media_type,
+        duration_seconds=duration,
+        duration_label=duration_label,
+        tags=tags,
+    )
 
 
 @router.get("/entries", response_model=PreviewEntriesResponse)
@@ -79,13 +89,9 @@ def get_entries(
         scope_label = f"已選 {len(resolved_paths)} 個範圍"
         scope_path = str(resolved_paths[0])
 
-    entries = [
-        e
-        for e in entries
-        if ctx.preview_service.relative_key_matches_tag_filter(e.relative_key, ctx.selected_filter_tags)
-    ]
     entries = ctx.preview_service.apply_media_entry_filter(
         entries,
+        ctx.selected_filter_tags,
         ctx.filter_duration_min,
         ctx.filter_duration_max,
         ctx.filter_media_video,
@@ -106,7 +112,7 @@ def get_entries(
                 ),
             )
 
-    items = [_entry_to_item(ctx, e) for e in entries]
+    items = [_entry_to_item(e) for e in entries]
     breadcrumb = ctx.tree_service.get_breadcrumb(scope_path)
     return PreviewEntriesResponse(
         scope_label=scope_label,
@@ -135,6 +141,7 @@ def get_media(
         entry = ctx.preview_service.build_entry_for_folder(folder, folder.parent.name)
         _, display = ctx.preview_service.scan_media_for_preview(
             folder,
+            ctx.selected_filter_tags,
             ctx.filter_media_video,
             ctx.filter_media_image,
             ctx.filter_duration_min,
@@ -151,6 +158,7 @@ def get_media(
         for folder in folders:
             _, folder_items = ctx.preview_service.scan_media_for_preview(
                 folder,
+                ctx.selected_filter_tags,
                 ctx.filter_media_video,
                 ctx.filter_media_image,
                 ctx.filter_duration_min,
@@ -188,26 +196,86 @@ def get_media(
                 ),
             )
 
-    items: list[MediaItemResponse] = []
-    for m in display:
-        duration = None
-        duration_label = None
-        if m.media_type == "video":
-            duration = ctx.thumbnail_service.get_video_duration_seconds(m.media_path)
-            if duration is not None:
-                duration_label = ThumbnailService.format_video_duration(duration)
-        items.append(
-            MediaItemResponse(
-                id=str(m.media_path.resolve()),
-                path=str(m.media_path.resolve()),
-                name=m.media_path.name,
-                media_type=m.media_type,
-                duration_seconds=duration,
-                duration_label=duration_label,
-            )
+    tags_map = ctx.preview_service.get_media_tags_map(display)
+    items = [
+        _media_to_item(
+            ctx,
+            m.media_path,
+            m.media_type,
+            tags_map.get(str(m.media_path.resolve()), []),
         )
+        for m in display
+    ]
 
     breadcrumb = ctx.tree_service.get_breadcrumb(str(folders[0]))
+    return PreviewMediaResponse(
+        scope_label=scope_label,
+        scope_path=scope_path,
+        items=items,
+        breadcrumb=[{"name": b["name"], "path": b["path"]} for b in breadcrumb],
+    )
+
+
+@router.get("/tagged-media", response_model=PreviewMediaResponse)
+def get_tagged_media(
+    paths: list[str] = Query(default=[]),
+) -> PreviewMediaResponse:
+    ctx = get_ctx()
+    if ctx.store.root_folder is None:
+        raise HTTPException(status_code=400, detail="請先設定主資料夾")
+    if not ctx.selected_filter_tags:
+        raise HTTPException(status_code=400, detail="請先選擇至少一個標籤")
+
+    root = ctx.store.root_folder.resolve()
+    scope_paths = [Path(p).resolve() for p in paths if p]
+    if not scope_paths:
+        scope_paths = [root]
+
+    display = ctx.preview_service.scan_tagged_media_in_scope(
+        scope_paths,
+        ctx.selected_filter_tags,
+        ctx.filter_media_video,
+        ctx.filter_media_image,
+        ctx.filter_duration_min,
+        ctx.filter_duration_max,
+    )
+    display = ctx.preview_service.sorted_media(display, ctx.preview_sort_mode)
+
+    if len(scope_paths) == 1:
+        scope_path = str(scope_paths[0])
+        if scope_paths[0] == root:
+            scope_label = f"{root.name}（標籤篩選）"
+        else:
+            scope_label = f"{scope_paths[0].name}（標籤篩選）"
+    else:
+        scope_path = "||".join(str(p) for p in scope_paths)
+        scope_label = f"已選 {len(scope_paths)} 個範圍（標籤篩選）"
+
+    if ctx.preview_sort_mode == "manual":
+        order = ctx.manual_media_order.get(scope_path, [])
+        if order:
+            display = sorted(
+                display,
+                key=lambda m: (
+                    order.index(str(m.media_path.resolve()))
+                    if str(m.media_path.resolve()) in order
+                    else 10_000,
+                    m.media_path.name.casefold(),
+                ),
+            )
+
+    tags_map = ctx.preview_service.get_media_tags_map(display)
+    items = [
+        _media_to_item(
+            ctx,
+            m.media_path,
+            m.media_type,
+            tags_map.get(str(m.media_path.resolve()), []),
+        )
+        for m in display
+    ]
+
+    breadcrumb = ctx.tree_service.get_breadcrumb(str(scope_paths[0]))
     return PreviewMediaResponse(
         scope_label=scope_label,
         scope_path=scope_path,

@@ -38,7 +38,6 @@ export function EntryCard({
   onDrop,
 }: EntryCardProps) {
   const [loadedSrc, setLoadedSrc] = useState<string | null>(null)
-  const tags = item.tags.length ? item.tags.join(', ') : '（尚未標籤）'
   const thumbnailSrc = api.entryThumbUrl(item.path, thumbnailVersion)
   const loaded = loadedSrc === thumbnailSrc
 
@@ -120,12 +119,9 @@ export function EntryCard({
           </span>
         )}
       </div>
-      <div className="p-3 pt-2 flex flex-col gap-1 min-h-[88px]">
+      <div className="p-3 pt-2 flex flex-col gap-1 min-h-[72px]">
         <p className="text-sm font-semibold truncate" title={item.subfolder_name}>
           {item.subfolder_name}
-        </p>
-        <p className="text-xs text-[var(--color-text-muted)] truncate" title={tags}>
-          標籤：{tags}
         </p>
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs text-[var(--color-text-muted)]">媒體數量：{item.media_count}</p>

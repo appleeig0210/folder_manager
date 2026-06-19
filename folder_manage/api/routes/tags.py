@@ -28,7 +28,13 @@ def _filter_state(ctx) -> FilterState:
 @router.get("", response_model=TagListResponse)
 def list_tags() -> TagListResponse:
     ctx = get_ctx()
-    return TagListResponse(all_tags=ctx.tag_repo.get_all_tags(), filter_state=_filter_state(ctx))
+    if ctx.store.root_folder is None:
+        return TagListResponse(all_tags=[], filter_state=_filter_state(ctx))
+    try:
+        all_tags = ctx.keyword_service.collect_all_tags(ctx.store)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return TagListResponse(all_tags=all_tags, filter_state=_filter_state(ctx))
 
 
 @router.patch("/filter", response_model=TagListResponse)
@@ -41,21 +47,50 @@ def update_filter(state: FilterState) -> TagListResponse:
     ctx.filter_duration_max = state.duration_max
     ctx.preview_sort_mode = state.sort_mode
     ctx.preview_service.clear_filter_cache()
-    return TagListResponse(all_tags=ctx.tag_repo.get_all_tags(), filter_state=_filter_state(ctx))
+    all_tags = []
+    if ctx.store.root_folder is not None:
+        try:
+            all_tags = ctx.keyword_service.collect_all_tags(ctx.store)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return TagListResponse(all_tags=all_tags, filter_state=_filter_state(ctx))
 
 
 @router.post("/set", response_model=StatusResponse)
 def set_tags(body: SetTagsRequest) -> StatusResponse:
     ctx = get_ctx()
-    merged = ctx.tag_repo.set_tags(body.relative_key, body.tags)
-    return StatusResponse(message=f"已更新標籤：{', '.join(merged) or '（無）'}")
+    paths = [Path(p) for p in body.paths if (p or "").strip()]
+    if not paths:
+        raise HTTPException(status_code=400, detail="請提供至少一個媒體檔路徑")
+    try:
+        updated, warnings = ctx.keyword_service.set_keywords_batch(paths, body.tags)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    ctx.preview_service.clear_filter_cache()
+    message = f"已更新 {updated} 個媒體檔標籤"
+    if warnings:
+        message += f"（{len(warnings)} 個失敗）"
+    return StatusResponse(message=message)
 
 
 @router.post("/add", response_model=StatusResponse)
 def add_tags(body: SetTagsRequest) -> StatusResponse:
     ctx = get_ctx()
-    merged = ctx.tag_repo.add_tags(body.relative_key, body.tags)
-    return StatusResponse(message=f"已添加標籤：{', '.join(merged)}")
+    paths = [Path(p) for p in body.paths if (p or "").strip()]
+    tags = [tag.strip() for tag in body.tags if tag.strip()]
+    if not paths:
+        raise HTTPException(status_code=400, detail="請提供至少一個媒體檔路徑")
+    if not tags:
+        raise HTTPException(status_code=400, detail="請提供至少一個標籤")
+    try:
+        updated, warnings = ctx.keyword_service.add_keywords_batch(paths, tags)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    ctx.preview_service.clear_filter_cache()
+    message = f"已為 {updated} 個媒體檔添加標籤：{', '.join(tags)}"
+    if warnings:
+        message += f"（{len(warnings)} 個失敗）"
+    return StatusResponse(message=message)
 
 
 @router.post("/delete", response_model=TagListResponse)
@@ -64,44 +99,78 @@ def delete_tags(body: DeleteTagsRequest) -> TagListResponse:
     tags = [tag.strip() for tag in body.tags if tag.strip()]
     if not tags:
         raise HTTPException(status_code=400, detail="請提供要刪除的標籤")
-    ctx.tag_repo.remove_tags_everywhere(tags)
+    if ctx.store.root_folder is None:
+        raise HTTPException(status_code=400, detail="請先設定主資料夾")
+    try:
+        ctx.keyword_service.remove_tags_everywhere(ctx.store, tags)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     deleted = {tag.casefold() for tag in tags}
     ctx.selected_filter_tags = {
         tag for tag in ctx.selected_filter_tags if tag.casefold() not in deleted
     }
     ctx.preview_service.clear_filter_cache()
-    return TagListResponse(all_tags=ctx.tag_repo.get_all_tags(), filter_state=_filter_state(ctx))
+    all_tags = ctx.keyword_service.collect_all_tags(ctx.store)
+    return TagListResponse(all_tags=all_tags, filter_state=_filter_state(ctx))
+
+
+@router.post("/invalidate", response_model=StatusResponse)
+def invalidate_cache() -> StatusResponse:
+    ctx = get_ctx()
+    ctx.keyword_service.invalidate_all()
+    ctx.preview_service.clear_filter_cache()
+    return StatusResponse(message="已清除媒體標籤快取")
 
 
 @router.get("/export")
 def export_tags(format: str = "json") -> PlainTextResponse:
     ctx = get_ctx()
+    if ctx.store.root_folder is None:
+        raise HTTPException(status_code=400, detail="請先設定主資料夾")
+    try:
+        payload = ctx.keyword_service.export_map(ctx.store)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if format == "csv":
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["subfolder_path", "tags"])
-        for key in sorted(ctx.tag_repo._tags_by_key.keys(), key=str.lower):
-            writer.writerow([key, ";".join(ctx.tag_repo.get_tags(key))])
+        writer.writerow(["file_path", "tags"])
+        for key in sorted(payload.keys(), key=str.lower):
+            writer.writerow([key, ";".join(payload[key])])
         return PlainTextResponse(buf.getvalue(), media_type="text/csv")
-    payload = json.dumps(ctx.tag_repo._tags_by_key, ensure_ascii=False, indent=2)
-    return PlainTextResponse(payload, media_type="application/json")
+    return PlainTextResponse(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+    )
 
 
 @router.post("/import", response_model=StatusResponse)
 def import_tags(body: ImportTagsRequest) -> StatusResponse:
     ctx = get_ctx()
-    tmp = Path(ctx.tag_repo.base_dir) / "_import_tmp"
+    if ctx.store.root_folder is None:
+        raise HTTPException(status_code=400, detail="請先設定主資料夾")
     try:
         if body.format == "json":
-            tmp.write_text(body.content, encoding="utf-8")
-            ctx.tag_repo.import_json(tmp, merge=body.merge)
+            payload = json.loads(body.content)
+            if not isinstance(payload, dict):
+                raise ValueError("JSON 必須為 {file_path: [tags]} 格式")
+            imported = {
+                str(key): [str(t) for t in value if str(t).strip()]
+                for key, value in payload.items()
+                if isinstance(value, list)
+            }
         else:
-            tmp.write_text(body.content, encoding="utf-8-sig")
-            ctx.tag_repo.import_csv(tmp, merge=body.merge)
+            imported: dict[str, list[str]] = {}
+            reader = csv.DictReader(io.StringIO(body.content))
+            for row in reader:
+                key = (row.get("file_path") or row.get("subfolder_path") or "").strip()
+                tags_text = (row.get("tags") or "").strip()
+                if not key:
+                    continue
+                tags = [x.strip() for x in tags_text.split(";") if x.strip()]
+                imported[key] = tags
+        count = ctx.keyword_service.import_map(ctx.store, imported, merge=body.merge)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
     ctx.preview_service.clear_filter_cache()
-    return StatusResponse(message="已匯入標籤")
+    return StatusResponse(message=f"已匯入 {count} 筆媒體標籤")

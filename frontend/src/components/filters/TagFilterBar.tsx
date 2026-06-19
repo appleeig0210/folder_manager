@@ -14,7 +14,7 @@ export function TagFilterBar({ allTags, filter, expanded, onToggleExpand, onTogg
   return (
     <div className="border-b border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2">
       <div className="flex items-center justify-between gap-2 mb-2">
-        <span className="text-xs font-semibold text-[var(--color-text)]">標籤篩選（勾選即套用 OR）</span>
+        <span className="text-xs font-semibold text-[var(--color-text)]">媒體標籤篩選（勾選即套用 OR）</span>
         <button
           type="button"
           onClick={onToggleExpand}

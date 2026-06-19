@@ -6,18 +6,15 @@ from typing import Optional
 
 from api.services.preview_service import PreviewService
 from people_data_store import PeopleDataStore, SubfolderEntry
-from tag_repository import TagRepository
 
 
 class TreeService:
     def __init__(
         self,
         store: PeopleDataStore,
-        tag_repo: TagRepository,
         preview_service: PreviewService,
     ):
         self.store = store
-        self.tag_repo = tag_repo
         self.preview = preview_service
 
     def get_ordered_people_folders(self, child_order: dict[str, list[str]]) -> list[Path]:
@@ -236,7 +233,7 @@ class TreeService:
                         rk = self.store.to_relative_key(path)
                     except Exception:
                         continue
-                    if self.preview.relative_key_matches_tag_filter(rk, selected_filter_tags):
+                    if self.preview.folder_contains_tagged_media(path, selected_filter_tags):
                         if not self.preview.folder_matches_active_media_filter(
                             path, lo_min, hi_min, want_video, want_image
                         ):

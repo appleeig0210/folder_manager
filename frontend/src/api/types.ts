@@ -24,7 +24,6 @@ export interface EntryItem {
   preview_path?: string | null
   preview_type?: string | null
   media_count: number
-  tags: string[]
 }
 
 export interface MediaItem {
@@ -34,6 +33,7 @@ export interface MediaItem {
   media_type: 'image' | 'video'
   duration_seconds?: number | null
   duration_label?: string | null
+  tags: string[]
 }
 
 export interface FilterState {
@@ -64,6 +64,7 @@ export interface PreviewMediaResponse {
 export interface ConfigResponse {
   root_folder: string
   has_root: boolean
+  migration_message?: string | null
 }
 
 export interface TagListResponse {

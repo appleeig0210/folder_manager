@@ -202,6 +202,38 @@ export default function App() {
     }
   }, [])
 
+  const loadTaggedMedia = useCallback(async (paths: string[]) => {
+    setLoading(true)
+    try {
+      const res = await api.getTaggedMedia(paths)
+      setViewMode('media')
+      setMedia(res.items)
+      setEntries([])
+      setScopeLabel(res.scope_label)
+      setScopePath(res.scope_path)
+      setBreadcrumb(res.breadcrumb)
+      setSelectedIds(new Set())
+      setStatus(`已載入 ${res.items.length} 個符合標籤的媒體`)
+      return res
+    } catch (e) {
+      setViewMode('media')
+      setEntries([])
+      setMedia([])
+      setScopeLabel('標籤篩選載入失敗')
+      setBreadcrumb([])
+      setStatus(String(e))
+      return null
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const getTagFilterScopePaths = useCallback((): string[] => {
+    if (selectedTreePaths.length) return selectedTreePaths
+    if (config.root_folder) return [config.root_folder]
+    return []
+  }, [config.root_folder, selectedTreePaths])
+
   const init = useCallback(async () => {
     try {
       await api.health()
@@ -214,6 +246,7 @@ export default function App() {
         setSelectedTreePaths([cfg.root_folder])
         setSelectedTreeTypes({ [cfg.root_folder]: 'root' })
       }
+      setStatus(cfg.migration_message || '就緒')
     } catch (e) {
       setStatus(`無法連線後端：${e}`)
     }
@@ -222,24 +255,6 @@ export default function App() {
   useEffect(() => {
     init()
   }, [init])
-
-  const updateFilter = async (patch: Partial<FilterState>) => {
-    const next = { ...filter, ...patch }
-    setFilter(next)
-    const res = await api.updateFilter(next)
-    setAllTags(res.all_tags)
-    setFilter(res.filter_state)
-    await refreshTree()
-    if (selectedTreePaths.length) {
-      if (viewMode === 'media' && scopePath) {
-        const isMergedSubfolderView =
-          selectedTreePaths.length > 1 &&
-          selectedTreePaths.every((path) => classifyTreePath(path, selectedTreeTypes[path]) === 'subfolder')
-        await loadMedia(isMergedSubfolderView ? selectedTreePaths : scopePath)
-      }
-      else await loadEntries(selectedTreePaths)
-    }
-  }
 
   const toggleTag = (tag: string) => {
     const selected = filter.selected_tags.includes(tag)
@@ -284,6 +299,40 @@ export default function App() {
     )
   }, [classifyTreePath, selectedTreePaths, selectedTreeTypes])
 
+  const reloadPreviewForSelection = useCallback(
+    async (activeFilter: FilterState, treePaths: string[]) => {
+      if (activeFilter.selected_tags.length > 0) {
+        const scope = treePaths.length ? treePaths : config.root_folder ? [config.root_folder] : []
+        if (scope.length) await loadTaggedMedia(scope)
+        return
+      }
+      if (!treePaths.length) return
+      if (treePaths.length > 1) {
+        const allSubfolders = treePaths.every((path) => classifyTreePath(path, selectedTreeTypes[path]) === 'subfolder')
+        if (allSubfolders) await loadMedia(treePaths)
+        else await loadEntries(treePaths)
+        return
+      }
+      const nodeType = classifyTreePath(treePaths[0], selectedTreeTypes[treePaths[0]])
+      if (nodeType === 'subfolder') await loadMedia(treePaths[0])
+      else await loadEntries(treePaths)
+    },
+    [classifyTreePath, config.root_folder, loadEntries, loadMedia, loadTaggedMedia, selectedTreeTypes],
+  )
+
+  const updateFilter = async (patch: Partial<FilterState>) => {
+    const next = { ...filter, ...patch }
+    setFilter(next)
+    const res = await api.updateFilter(next)
+    setAllTags(res.all_tags)
+    setFilter(res.filter_state)
+    if ('selected_tags' in patch) {
+      setTreeRevision((version) => version + 1)
+    }
+    await refreshTree()
+    await reloadPreviewForSelection(res.filter_state, selectedTreePaths)
+  }
+
   const getMediaReloadTarget = useCallback((): string | string[] | null => {
     if (isMergedSubfolderSelection()) return selectedTreePaths
     if (scopePath.includes('||')) return scopePath.split('||').filter(Boolean)
@@ -291,13 +340,27 @@ export default function App() {
   }, [isMergedSubfolderSelection, scopePath, selectedTreePaths])
 
   const reloadCurrentPreview = useCallback(async () => {
+    if (filter.selected_tags.length > 0) {
+      const scope = getTagFilterScopePaths()
+      if (scope.length) await loadTaggedMedia(scope)
+      return
+    }
     if (viewMode === 'media') {
       const target = getMediaReloadTarget()
       if (target) await loadMedia(target)
       return
     }
     if (selectedTreePaths.length) await loadEntries(selectedTreePaths)
-  }, [getMediaReloadTarget, loadEntries, loadMedia, selectedTreePaths, viewMode])
+  }, [
+    filter.selected_tags,
+    getMediaReloadTarget,
+    getTagFilterScopePaths,
+    loadEntries,
+    loadMedia,
+    loadTaggedMedia,
+    selectedTreePaths,
+    viewMode,
+  ])
 
   const handleTreeSelect = async (paths: string[], node: TreeNode) => {
     setSelectedTreePaths(paths)
@@ -307,6 +370,11 @@ export default function App() {
       nextTypes[path] = classifyTreePath(path, knownNode?.type ?? selectedTreeTypes[path])
     }
     setSelectedTreeTypes(nextTypes)
+
+    if (filter.selected_tags.length > 0) {
+      await loadTaggedMedia(paths.length ? paths : config.root_folder ? [config.root_folder] : [])
+      return
+    }
 
     if (paths.length > 1) {
       const allSubfolders = paths.every((path) => classifyTreePath(path, nextTypes[path]) === 'subfolder')
@@ -329,6 +397,10 @@ export default function App() {
     setSelectedTreePaths([path])
     const node = findTreeNode(path)
     setSelectedTreeTypes({ [path]: classifyTreePath(path, node?.type) })
+    if (filter.selected_tags.length > 0) {
+      await loadTaggedMedia([path])
+      return
+    }
     const cfg = await api.getConfig()
     const depth = getPathDepthFromRoot(path)
     if (path === cfg.root_folder || depth === 0) {
@@ -411,7 +483,6 @@ export default function App() {
       items.push(
         { label: '新增資料夾…', onClick: () => promptCreateFolder(entry.path) },
         { separator: true, label: '', onClick: () => {} },
-        { label: '添加標籤', onClick: () => promptAddTags(entry.relative_key) },
         { label: '打開目標資料夾', onClick: () => api.openPath(entry.path) },
         { label: '重新命名資料夾', onClick: () => promptRenameFolder(entry.path, entry.subfolder_name) },
         { label: targetPaths.length > 1 ? `序號命名已選取項目（${targetPaths.length}）` : '序號命名', onClick: () => promptRenameNumbered(targetPaths) },
@@ -424,6 +495,15 @@ export default function App() {
         selectedIds.has(mediaItem.id) && selectedIds.size > 1 ? selectedPaths : [mediaItem.path]
       items.push(
         { label: '以程式開啟', onClick: () => api.openPath(mediaItem.path) },
+      )
+      if (targetPaths.length === 1) {
+        items.push({
+          label: '編輯標籤…',
+          onClick: () => promptEditTags(targetPaths, mediaItem.tags),
+        })
+      }
+      items.push(
+        { label: targetPaths.length > 1 ? `添加標籤（${targetPaths.length}）` : '添加標籤…', onClick: () => promptAddTags(targetPaths) },
         { label: '重新命名檔案', onClick: () => promptRenameFile(mediaItem.path) },
         { label: targetPaths.length > 1 ? `序號命名已選取項目（${targetPaths.length}）` : '序號命名', onClick: () => promptRenameNumbered(targetPaths) },
         { label: '轉移已選取項目到…', onClick: () => promptTransfer(targetPaths) },
@@ -516,11 +596,25 @@ export default function App() {
     await loadEntries(selectedTreePaths.length ? selectedTreePaths : [parent])
   }
 
-  const promptAddTags = async (relativeKey: string) => {
+  const promptEditTags = async (paths: string[], currentTags: string[]) => {
+    const uniquePaths = Array.from(new Set(paths)).filter(Boolean)
+    if (!uniquePaths.length) return
+    const raw = window.prompt('編輯標籤（以逗號分隔，留空可清除全部）：', currentTags.join(', '))
+    if (raw === null) return
+    const tags = raw.split(',').map((t) => t.trim()).filter(Boolean)
+    const res = await api.setTags(uniquePaths, tags)
+    setStatus(res.message)
+    await loadTags()
+    await reloadCurrentPreview()
+  }
+
+  const promptAddTags = async (paths: string[]) => {
+    const uniquePaths = Array.from(new Set(paths)).filter(Boolean)
+    if (!uniquePaths.length) return
     const raw = window.prompt('輸入標籤（以逗號分隔）：')
     if (!raw) return
     const tags = raw.split(',').map((t) => t.trim()).filter(Boolean)
-    const res = await api.addTags(relativeKey, tags)
+    const res = await api.addTags(uniquePaths, tags)
     setStatus(res.message)
     await loadTags()
     await reloadCurrentPreview()
@@ -530,7 +624,7 @@ export default function App() {
     const uniqueTags = Array.from(new Set(tags)).filter(Boolean)
     if (!uniqueTags.length) return
     const label = uniqueTags.length === 1 ? `「${uniqueTags[0]}」` : `${uniqueTags.length} 個已選取標籤`
-    if (!window.confirm(`確定要刪除${label}？此動作會從所有資料夾移除這些標籤。`)) return
+    if (!window.confirm(`確定要刪除${label}？此動作會從所有媒體檔移除這些標籤。`)) return
 
     try {
       const res = await api.deleteTags(uniqueTags)
@@ -723,7 +817,7 @@ export default function App() {
     const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/csv' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `folder_tags.${format}`
+    a.download = `media_tags.${format}`
     a.click()
     setStatus(`已匯出 ${format.toUpperCase()} 標籤`)
   }
@@ -769,6 +863,7 @@ export default function App() {
         onNavigate={handleNavigate}
         onChooseFolder={chooseFolder}
         onRefresh={async () => {
+          await api.invalidateTagCache()
           await refreshTree()
           await loadTags()
           await reloadCurrentPreview()
@@ -852,12 +947,10 @@ export default function App() {
 
       <SelectionToolbar
         count={selectedIds.size}
+        showAddTags={viewMode === 'media'}
         onTransfer={() => promptTransfer(selectedPaths)}
         onRenameNumbered={() => promptRenameNumbered(selectedPaths)}
-        onAddTags={() => {
-          const entry = entries.find((e) => selectedIds.has(e.id))
-          if (entry) promptAddTags(entry.relative_key)
-        }}
+        onAddTags={() => promptAddTags(selectedPaths)}
         onDelete={() => {
           if (viewMode === 'entries') {
             selectedPaths.forEach((p) => confirmDeleteFolder(p))

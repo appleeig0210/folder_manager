@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class ConfigResponse(BaseModel):
     root_folder: str
     has_root: bool
+    migration_message: Optional[str] = None
 
 
 class SetRootRequest(BaseModel):
@@ -39,7 +40,6 @@ class EntryItem(BaseModel):
     preview_path: Optional[str] = None
     preview_type: Optional[str] = None
     media_count: int
-    tags: list[str] = Field(default_factory=list)
 
 
 class MediaItemResponse(BaseModel):
@@ -49,6 +49,7 @@ class MediaItemResponse(BaseModel):
     media_type: Literal["image", "video"]
     duration_seconds: Optional[float] = None
     duration_label: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class PreviewEntriesResponse(BaseModel):
@@ -82,7 +83,7 @@ class TagListResponse(BaseModel):
 
 
 class SetTagsRequest(BaseModel):
-    relative_key: str
+    paths: list[str]
     tags: list[str]
 
 

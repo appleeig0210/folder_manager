@@ -167,15 +167,10 @@ function syncChildrenByPath(
   const fromApi = buildInitialChildrenByPath(nodes)
   const next: Record<string, TreeNode[]> = { ...fromApi }
 
+  // Keep lazy-expanded subtrees only for paths not present in the fresh API snapshot.
   for (const [path, cached] of Object.entries(current)) {
-    if (!cached.some((child) => child.type !== 'stub')) continue
-    const apiChildren = fromApi[path] ?? []
-    const apiChildPaths = new Set(
-      apiChildren.filter((child) => child.type !== 'stub').map((child) => child.path),
-    )
-    if (apiChildPaths.size > 0) {
-      next[path] = cached.filter((child) => child.type === 'stub' || apiChildPaths.has(child.path))
-    } else {
+    if (path in fromApi) continue
+    if (cached.some((child) => child.type !== 'stub')) {
       next[path] = cached
     }
   }
