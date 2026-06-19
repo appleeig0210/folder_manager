@@ -70,15 +70,51 @@ def get_media_file(
     path: str | None = Query(default=None),
     token: str | None = Query(default=None),
 ) -> FileResponse:
+    ctx = get_ctx()
     file_path = _decode_path_param(path, token)
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="檔案不存在")
+
+    serve_path = file_path
     media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+    if media_type.startswith("video/"):
+        try:
+            serve_path = ctx.thumbnail_service.get_streamable_video_path(file_path)
+            if serve_path.suffix.lower() == ".mp4":
+                media_type = "video/mp4"
+        except (RuntimeError, OSError):
+            serve_path = file_path
+
     return FileResponse(
-        file_path,
+        serve_path,
         media_type=media_type,
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "public, max-age=3600", "Accept-Ranges": "bytes"},
     )
+
+
+@router.get("/streamable/ready")
+def streamable_ready(
+    path: str | None = Query(default=None),
+    token: str | None = Query(default=None),
+) -> dict[str, bool]:
+    ctx = get_ctx()
+    file_path = _decode_path_param(path, token)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="檔案不存在")
+    return {"ready": ctx.thumbnail_service.has_streamable_video(file_path)}
+
+
+@router.post("/streamable/prepare")
+def prepare_streamable(
+    path: str | None = Query(default=None),
+    token: str | None = Query(default=None),
+) -> dict[str, bool]:
+    ctx = get_ctx()
+    file_path = _decode_path_param(path, token)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="檔案不存在")
+    queued = ctx.thumbnail_service.schedule_streamable_video(file_path)
+    return {"queued": queued}
 
 
 @router.get("/video-proxy/ready")

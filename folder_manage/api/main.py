@@ -76,6 +76,8 @@ def run():
     import signal
     import uvicorn
 
+    from api.access_log import uvicorn_log_config
+
     def _handle_shutdown(_signum, _frame):
         get_ctx().shutdown()
         raise SystemExit(0)
@@ -84,7 +86,13 @@ def run():
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
     # 打包成 exe 時不能用字串模組路徑，否則 uvicorn 無法 import api.main。
-    uvicorn.run(app, host="127.0.0.1", port=8765, reload=False)
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=8765,
+        reload=False,
+        log_config=uvicorn_log_config(),
+    )
 
 
 if __name__ == "__main__":

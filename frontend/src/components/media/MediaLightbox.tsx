@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, ExternalLink, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
+import { prepareStreamableVideo, resolveMediaPlaybackSource, type MediaPlaybackSource } from '../../lib/mediaPlayback'
 import { Button } from '../ui/Button'
 
 const VIDEO_SEEK_STEP_SECONDS = 1 / 30
@@ -10,8 +11,9 @@ const VIDEO_HOLD_SEEK_STEP_SECONDS = 1 / 60
 const VIDEO_HOLD_SEEK_INTERVAL_MS = 90
 const VIDEO_SEEK_SETTLE_TIMEOUT_MS = 180
 const FINE_SEEK_WINDOW_SECONDS = 4
-const COARSE_SEEK_PREVIEW_MS = 50
-const FINE_SEEK_PREVIEW_MS = 50
+const COARSE_SEEK_PREVIEW_MS = 150
+const FINE_SEEK_PREVIEW_MS = 150
+const SCRUB_SEEK_MIN_DELTA_SECONDS = 0.1
 const FINE_SEEK_STEP_SECONDS = 1 / 60
 const FINE_SEEK_NUDGE_SECONDS = 0.02
 
@@ -33,6 +35,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const [scrubbing, setScrubbing] = useState(false)
   const [scrubMode, setScrubMode] = useState<'coarse' | 'fine' | null>(null)
   const [scrubDraftTime, setScrubDraftTime] = useState<number | null>(null)
+  const [videoPlayback, setVideoPlayback] = useState<MediaPlaybackSource | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const savingFrameRef = useRef(false)
@@ -48,6 +51,9 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const resumeAfterScrubRef = useRef(false)
   const seekingRef = useRef(false)
   const seekTokenRef = useRef(0)
+  const scrubSeekingRef = useRef(false)
+  const scrubModeRef = useRef<'coarse' | 'fine' | null>(null)
+  const lastAppliedScrubSeekRef = useRef<number | null>(null)
   const activeItemIdRef = useRef(items[initialIndex]?.id)
   const activeIndex = activeItemIdRef.current
     ? items.findIndex((candidate) => candidate.id === activeItemIdRef.current)
@@ -178,6 +184,52 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     applySeek(seconds, recenter)
   }, [applySeek])
 
+  const tryFlushPendingScrubSeek = useCallback(() => {
+    if (!scrubbingRef.current || scrubSeekingRef.current) return
+
+    const mode = scrubModeRef.current
+    if (mode !== 'coarse' && mode !== 'fine') return
+
+    const target = mode === 'fine' ? pendingFineSeekRef.current : pendingCoarseSeekRef.current
+    if (target === null) return
+
+    const video = videoRef.current
+    if (!video || !item || item.media_type !== 'video') return
+
+    const baseline = lastAppliedScrubSeekRef.current ?? video.currentTime
+    if (Math.abs(target - baseline) < SCRUB_SEEK_MIN_DELTA_SECONDS) return
+
+    const duration = Number.isFinite(video.duration) ? video.duration : videoDuration
+    const nextTime = Math.min(Math.max(target, 0), duration || Number.POSITIVE_INFINITY)
+
+    const token = seekTokenRef.current + 1
+    seekTokenRef.current = token
+    scrubSeekingRef.current = true
+    lastAppliedScrubSeekRef.current = nextTime
+
+    const releaseScrubSeek = () => {
+      if (seekTokenRef.current !== token) return
+      if (!scrubSeekingRef.current) return
+      scrubSeekingRef.current = false
+      if (!scrubbingRef.current) return
+
+      const pending = scrubModeRef.current === 'fine'
+        ? pendingFineSeekRef.current
+        : pendingCoarseSeekRef.current
+      const lastApplied = lastAppliedScrubSeekRef.current ?? nextTime
+      if (
+        pending !== null &&
+        Math.abs(pending - lastApplied) >= SCRUB_SEEK_MIN_DELTA_SECONDS
+      ) {
+        tryFlushPendingScrubSeek()
+      }
+    }
+
+    video.addEventListener('seeked', releaseScrubSeek, { once: true })
+    window.setTimeout(releaseScrubSeek, VIDEO_SEEK_SETTLE_TIMEOUT_MS)
+    video.currentTime = nextTime
+  }, [item, videoDuration])
+
   const stopCoarsePreview = useCallback(() => {
     if (coarsePreviewTimerRef.current !== null) {
       window.clearTimeout(coarsePreviewTimerRef.current)
@@ -187,11 +239,10 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   }, [])
 
   const flushCoarsePreview = useCallback(() => {
-    const target = pendingCoarseSeekRef.current
-    if (target === null || !scrubbingRef.current) return
+    if (!scrubbingRef.current || scrubModeRef.current !== 'coarse') return
     lastCoarsePreviewAtRef.current = performance.now()
-    applySeek(target, false, false)
-  }, [applySeek])
+    tryFlushPendingScrubSeek()
+  }, [tryFlushPendingScrubSeek])
 
   const scheduleCoarsePreview = useCallback(() => {
     if (coarsePreviewTimerRef.current !== null) return
@@ -212,11 +263,10 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   }, [])
 
   const flushFinePreview = useCallback(() => {
-    const target = pendingFineSeekRef.current
-    if (target === null || !scrubbingRef.current) return
+    if (!scrubbingRef.current || scrubModeRef.current !== 'fine') return
     lastFinePreviewAtRef.current = performance.now()
-    applySeek(target, false, false)
-  }, [applySeek])
+    tryFlushPendingScrubSeek()
+  }, [tryFlushPendingScrubSeek])
 
   const scheduleFinePreview = useCallback(() => {
     if (finePreviewTimerRef.current !== null) return
@@ -246,9 +296,11 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     stopFinePreview()
     resumeAfterScrubRef.current = Boolean(video && !video.paused)
     video?.pause()
+    scrubModeRef.current = 'coarse'
     setScrubMode('coarse')
     scrubbingRef.current = true
     setScrubbing(true)
+    lastAppliedScrubSeekRef.current = current
     scrubDraftRef.current = current
     setScrubDraftTime(current)
     pendingCoarseSeekRef.current = current
@@ -262,10 +314,12 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     stopFinePreview()
     resumeAfterScrubRef.current = Boolean(video && !video.paused)
     video?.pause()
+    scrubModeRef.current = 'fine'
     setFineSeekCenter(current)
     setScrubMode('fine')
     scrubbingRef.current = true
     setScrubbing(true)
+    lastAppliedScrubSeekRef.current = current
     syncScrubDraft(current)
     pendingFineSeekRef.current = current
     lastFinePreviewAtRef.current = 0
@@ -273,13 +327,17 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
 
   const finishScrub = useCallback((nextTime: number) => {
     if (!scrubbingRef.current) return
+    seekTokenRef.current += 1
+    scrubSeekingRef.current = false
     scrubbingRef.current = false
+    scrubModeRef.current = null
     setScrubMode(null)
     stopCoarsePreview()
     stopFinePreview()
     setScrubbing(false)
     scrubDraftRef.current = null
     setScrubDraftTime(null)
+    lastAppliedScrubSeekRef.current = null
     setFineSeekCenter(nextTime)
     applySeek(nextTime, true, true)
     if (resumeAfterScrubRef.current) {
@@ -395,11 +453,35 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     setScrubMode(null)
     setScrubDraftTime(null)
     scrubbingRef.current = false
+    scrubModeRef.current = null
+    scrubSeekingRef.current = false
     scrubDraftRef.current = null
+    lastAppliedScrubSeekRef.current = null
     resumeAfterScrubRef.current = false
     stopCoarsePreview()
     stopFinePreview()
   }, [item?.id, stopCoarsePreview, stopFinePreview, stopHoldSeek])
+
+  useEffect(() => {
+    if (item?.media_type !== 'video') {
+      setVideoPlayback(null)
+      return
+    }
+
+    let cancelled = false
+    setVideoPlayback(null)
+    setLoaded(false)
+    setLoadError(false)
+    prepareStreamableVideo(item.path)
+
+    void resolveMediaPlaybackSource(item.path).then((source) => {
+      if (!cancelled) setVideoPlayback(source)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [item?.id, item?.media_type, item?.path])
 
   useEffect(() => {
     const onRelease = () => {
@@ -541,16 +623,16 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                   <p className="mt-1 text-white/45">可按「以程式開啟」使用系統播放器或看圖工具。</p>
                 </div>
               </div>
-            ) : item.media_type === 'video' ? (
+            ) : item.media_type === 'video' && videoPlayback?.src ? (
               <motion.video
                 key={item.id}
                 ref={videoRef}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: loaded ? 1 : 0 }}
                 transition={{ duration: 0.2 }}
-                src={api.mediaFileUrl(item.path)}
-                crossOrigin="anonymous"
-                preload="auto"
+                src={videoPlayback.src}
+                {...(videoPlayback.crossOrigin ? { crossOrigin: videoPlayback.crossOrigin } : {})}
+                preload={videoPlayback.via === 'asset' ? 'auto' : 'metadata'}
                 className="max-w-full max-h-full rounded-[var(--radius-md)] bg-black shadow-2xl"
                 controls
                 autoPlay
@@ -571,20 +653,23 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                   setFineSeekCenter(current)
                 }}
                 onPause={(event) => {
+                  if (scrubbingRef.current) return
                   const current = event.currentTarget.currentTime
                   setVideoTime(current)
-                  if (!scrubbingRef.current) setFineSeekCenter(current)
+                  setFineSeekCenter(current)
                 }}
                 onCanPlay={() => setLoaded(true)}
                 onTimeUpdate={(event) => {
+                  if (scrubbingRef.current) return
                   const current = event.currentTarget.currentTime
                   setVideoTime(current)
-                  if (!scrubbingRef.current) setFineSeekCenter(current)
+                  setFineSeekCenter(current)
                 }}
                 onSeeked={(event) => {
+                  if (scrubbingRef.current) return
                   const current = event.currentTarget.currentTime
                   setVideoTime(current)
-                  if (!scrubbingRef.current) setFineSeekCenter(current)
+                  setFineSeekCenter(current)
                 }}
                 onError={() => {
                   setLoadError(true)
@@ -621,7 +706,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           </button>
         </div>
 
-        {item.media_type === 'video' && !loadError && (
+        {item.media_type === 'video' && !loadError && videoPlayback?.src && (
           <div className="px-6 pb-2 text-white">
             <div className="mx-auto flex max-w-4xl flex-col gap-2 rounded-[var(--radius-md)] border border-white/10 bg-white/5 px-4 py-2">
               <div className="flex items-center justify-between gap-3 text-xs text-white/65">

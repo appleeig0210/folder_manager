@@ -118,6 +118,10 @@ export const api = {
     `${API_BASE}/api/thumbnails/media?path=${encodeURIComponent(path)}&media_type=${mediaType}&v=${version}`,
   mediaFileUrl: (path: string) =>
     `${API_BASE}/api/thumbnails/file?token=${encodePathToken(path)}`,
+  prepareStreamableVideo: (path: string) =>
+    request<{ queued: boolean }>(`/api/thumbnails/streamable/prepare?token=${encodePathToken(path)}`, {
+      method: 'POST',
+    }),
   getTags: () => request<TagListResponse>('/api/tags'),
   updateFilter: (state: FilterState) =>
     request<TagListResponse>('/api/tags/filter', {

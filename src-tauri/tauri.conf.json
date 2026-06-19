@@ -22,7 +22,25 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset:; connect-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 ws://127.0.0.1:8765 ws://localhost:8765; img-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 data: blob:; media-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 blob:; style-src 'self' 'unsafe-inline' asset:; script-src 'self' 'unsafe-inline' asset:"
+      "csp": "default-src 'self' asset:; connect-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 ws://127.0.0.1:8765 ws://localhost:8765; img-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 http://asset.localhost data: blob:; media-src 'self' asset: http://127.0.0.1:8765 http://localhost:8765 http://asset.localhost blob:; style-src 'self' 'unsafe-inline' asset:; script-src 'self' 'unsafe-inline' asset:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "requireLiteralLeadingDot": false,
+          "allow": [
+            "$HOME/**",
+            "$DESKTOP/**",
+            "$DOWNLOAD/**",
+            "$DOCUMENT/**",
+            "$VIDEO/**",
+            "$DATA/**",
+            "C:/**",
+            "D:/**",
+            "E:/**",
+            "F:/**"
+          ]
+        }
+      }
     }
   },
   "bundle": {

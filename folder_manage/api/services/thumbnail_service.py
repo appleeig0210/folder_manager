@@ -198,6 +198,98 @@ class ThumbnailService:
         video = Path(video_path).resolve()
         return self.cache_dir / f"{self._hash_path(video)}_proxy_v4.mp4"
 
+    def streamable_cache_path(self, video_path: Path) -> Path:
+        video = Path(video_path).resolve()
+        return self.cache_dir / f"{self._hash_path(video)}_faststart.mp4"
+
+    def has_streamable_video(self, video_path: Path) -> bool:
+        target = self.streamable_cache_path(video_path)
+        return target.exists() and target.stat().st_size > 0
+
+    def get_streamable_video_path(self, video_path: Path) -> Path:
+        """Moov-at-front copy for HTTP seeking. Stream copy only (no re-encode)."""
+        video = Path(video_path).resolve()
+        if not video.is_file():
+            raise FileNotFoundError("找不到影片檔案")
+
+        cached = self.streamable_cache_path(video)
+        if cached.exists() and cached.stat().st_size > 0:
+            return cached
+        if not self.ffmpeg_path:
+            return video
+        return self._build_streamable_faststart(video)
+
+    def schedule_streamable_video(self, video_path: Path) -> bool:
+        video = Path(video_path).resolve()
+        if not video.is_file() or not self.ffmpeg_path or self.has_streamable_video(video):
+            return False
+
+        cache_key = f"streamable::{video}"
+        with self._proxy_jobs_lock:
+            if cache_key in self._proxy_jobs:
+                return False
+            self._proxy_jobs.add(cache_key)
+
+        thread = threading.Thread(
+            target=self._build_streamable_video_job,
+            args=(video, cache_key),
+            daemon=True,
+            name=f"streamable-{video.stem[:24]}",
+        )
+        thread.start()
+        return True
+
+    def _build_streamable_video_job(self, video: Path, cache_key: str) -> None:
+        try:
+            self._build_streamable_faststart(video)
+        finally:
+            with self._proxy_jobs_lock:
+                self._proxy_jobs.discard(cache_key)
+
+    def _build_streamable_faststart(self, video_path: Path) -> Path:
+        video = Path(video_path).resolve()
+        if not video.is_file():
+            raise FileNotFoundError("找不到影片檔案")
+        if not self.ffmpeg_path:
+            return video
+
+        target_file = self.streamable_cache_path(video)
+        if target_file.exists() and target_file.stat().st_size > 0:
+            return target_file
+
+        with self._video_semaphore:
+            if target_file.exists() and target_file.stat().st_size > 0:
+                return target_file
+            temp_file = target_file.with_suffix(".tmp.mp4")
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception:
+                    pass
+
+            command = [
+                self.ffmpeg_path,
+                "-y",
+                "-i",
+                str(video),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(temp_file),
+            ]
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                **_subprocess_hide_window_kwargs(),
+            )
+            if result.returncode != 0 or not temp_file.exists() or temp_file.stat().st_size == 0:
+                raise RuntimeError("快速啟動影片封裝失敗")
+            temp_file.replace(target_file)
+        return target_file
+
     def has_video_proxy(self, video_path: Path) -> bool:
         target_file = self.video_proxy_cache_path(video_path)
         return target_file.exists() and target_file.stat().st_size > 0
