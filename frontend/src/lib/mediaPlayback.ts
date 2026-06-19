@@ -1,5 +1,5 @@
 import { api } from '../api/client'
-import { isTauriRuntime } from './utils'
+import { isDesktopApp } from './platform'
 
 export type MediaPlaybackSource = {
   src: string
@@ -8,7 +8,7 @@ export type MediaPlaybackSource = {
 }
 
 export async function resolveMediaPlaybackSource(filePath: string): Promise<MediaPlaybackSource> {
-  if (isTauriRuntime()) {
+  if (isDesktopApp()) {
     try {
       const { convertFileSrc } = await import('@tauri-apps/api/core')
       return { src: convertFileSrc(filePath), via: 'asset' }
@@ -25,6 +25,6 @@ export async function resolveMediaPlaybackSource(filePath: string): Promise<Medi
 }
 
 export function prepareStreamableVideo(path: string): void {
-  if (isTauriRuntime()) return
+  if (isDesktopApp()) return
   void api.prepareStreamableVideo(path).catch(() => {})
 }

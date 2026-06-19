@@ -174,6 +174,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ video_path, image_data_url, timestamp_seconds }),
     }),
+  saveVideoFrameAtTimestamp: (video_path: string, timestamp_seconds: number) =>
+    request<StatusResponse>('/api/files/video-frame', {
+      method: 'POST',
+      body: JSON.stringify({ video_path, timestamp_seconds }),
+    }),
   deleteFiles: (paths: string[]) =>
     request<StatusResponse>('/api/files/files', {
       method: 'DELETE',
