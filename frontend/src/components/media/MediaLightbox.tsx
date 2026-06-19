@@ -5,8 +5,9 @@ import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
 import { prepareStreamableVideo, resolveMediaPlaybackSource, type MediaPlaybackSource } from '../../lib/mediaPlayback'
 import { isNativeMpvAvailable, mpvDetach, mpvGetDuration, mpvGetTime, mpvSeek, mpvSetPaused } from '../../lib/mpvPlayer'
-import { getMpvScrubProfile, getVideoScrubProfile, shouldUseServerFrameExtract, type VideoScrubProfile } from '../../lib/platform'
+import { getMpvScrubProfile, getVideoScrubProfile, isDesktopApp, shouldProbeNativeMpv, shouldUseServerFrameExtract, type VideoScrubProfile } from '../../lib/platform'
 import { getVideoPlaybackModeInfo, playbackModeBadgeClass } from '../../lib/playbackDiagnostics'
+import { WebVideoNotice } from './WebVideoNotice'
 import { MpvVideoSurface } from './MpvVideoSurface'
 import { disposeVideoElement } from './videoUtils'
 import { Button } from '../ui/Button'
@@ -620,6 +621,20 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     mpvReadyRef.current = false
     mpvPausedRef.current = false
 
+    if (!shouldProbeNativeMpv()) {
+      setMpvProbeDone(true)
+      setMpvMode(false)
+      mpvModeRef.current = false
+      prepareStreamableVideo(item.path)
+      void resolveMediaPlaybackSource(item.path).then((source) => {
+        if (!cancelled) setVideoPlayback(source)
+      })
+      return () => {
+        cancelled = true
+        disposeVideoElement(videoRef.current)
+      }
+    }
+
     void isNativeMpvAvailable().then((available) => {
       if (cancelled) return
       setMpvProbeDone(true)
@@ -909,6 +924,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
 
         {item.media_type === 'video' && !loadError && (mpvMode || mpvReady || videoPlayback?.src) && (
           <div className="relative z-30 shrink-0 px-6 pb-2 text-white">
+            {!isDesktopApp() ? <WebVideoNotice /> : null}
             <div className="mx-auto flex max-w-4xl flex-col gap-2 rounded-[var(--radius-md)] border border-white/10 bg-white/5 px-4 py-2">
               <div className="flex items-center justify-between gap-3 text-xs text-white/65">
                 <span>目前 {formatTimestampFine(displayedTime)}</span>

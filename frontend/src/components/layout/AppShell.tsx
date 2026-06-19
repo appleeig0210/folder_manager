@@ -21,6 +21,7 @@ interface AppShellProps {
   onRefresh: () => void
   onImportTags: () => void
   onExportTags: () => void
+  platformLabel?: string
 }
 
 export function AppShell({
@@ -39,6 +40,7 @@ export function AppShell({
   onRefresh,
   onImportTags,
   onExportTags,
+  platformLabel,
 }: AppShellProps) {
   return (
     <div className="h-full flex flex-col bg-[var(--color-bg)]">
@@ -104,7 +106,10 @@ export function AppShell({
 
       <footer className="shrink-0 flex items-center justify-between px-4 h-9 border-t border-[var(--color-border)] bg-[var(--color-panel)] text-xs text-[var(--color-text-muted)]">
         <span className="truncate">{status}</span>
-        <span className="truncate ml-4">{scopeLabel}</span>
+        <div className="ml-4 flex min-w-0 items-center gap-3">
+          {platformLabel ? <span className="shrink-0">{platformLabel}</span> : null}
+          <span className="truncate">{scopeLabel}</span>
+        </div>
       </footer>
     </div>
   )

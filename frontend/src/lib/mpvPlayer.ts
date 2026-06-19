@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { isDesktopApp } from './platform'
+import { shouldProbeNativeMpv } from './platform'
 
 export type MpvBounds = {
   x: number
@@ -10,7 +10,7 @@ export type MpvBounds = {
 }
 
 export async function isNativeMpvAvailable(): Promise<boolean> {
-  if (!isDesktopApp()) return false
+  if (!shouldProbeNativeMpv()) return false
   try {
     return await invoke<boolean>('mpv_is_available')
   } catch {

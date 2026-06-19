@@ -17,6 +17,8 @@ import { MediaLightbox } from './components/media/MediaLightbox'
 import { ContextMenu, type ContextMenuItem } from './components/ui/ContextMenu'
 import { Button } from './components/ui/Button'
 import { isTauriRuntime, normalizeFolderPath } from './lib/utils'
+import { getPlatformLabel, isDesktopApp } from './lib/platform'
+import { isWebLimitedBannerDismissed, WebLimitedBanner } from './components/layout/WebLimitedBanner'
 
 const DEFAULT_FILTER: FilterState = {
   selected_tags: [],
@@ -110,6 +112,7 @@ export default function App() {
   const [anchorIndex, setAnchorIndex] = useState<number | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [darkMode, setDarkMode] = useState(getInitialDarkMode)
+  const [webBannerDismissed, setWebBannerDismissed] = useState(isWebLimitedBannerDismissed)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; targetId: string } | null>(null)
   const [sidebarContextMenu, setSidebarContextMenu] = useState<{ x: number; y: number; paths: string[] } | null>(null)
@@ -719,7 +722,11 @@ export default function App() {
   const selectedPaths = visibleItems.filter((item) => selectedIds.has(item.id)).map((item) => item.path)
 
   return (
-    <>
+    <div className="h-full flex flex-col min-h-0">
+      {!isDesktopApp() && !webBannerDismissed ? (
+        <WebLimitedBanner onDismiss={() => setWebBannerDismissed(true)} />
+      ) : null}
+      <div className="flex-1 flex flex-col min-h-0">
       <input ref={fileInputRef} type="file" accept=".json,.csv" className="hidden" onChange={onImportFile} />
       <AppShell
         sidebar={
@@ -759,6 +766,7 @@ export default function App() {
         }}
         onImportTags={handleImportTags}
         onExportTags={handleExportTags}
+        platformLabel={getPlatformLabel()}
       >
         <TagFilterBar
           allTags={allTags}
@@ -938,6 +946,7 @@ export default function App() {
           </div>
         </div>
       )}
-    </>
+      </div>
+    </div>
   )
 }

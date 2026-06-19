@@ -60,13 +60,6 @@ pub unsafe fn position_child_surface(hwnd: HWND, bounds: &MpvBounds) -> Result<(
     Ok(())
 }
 
-pub unsafe fn hide_child_surface(hwnd: HWND) -> Result<(), String> {
-    if !hwnd.0.is_null() {
-        let _ = ShowWindow(hwnd, SW_HIDE);
-    }
-    Ok(())
-}
-
 pub unsafe fn destroy_child_surface(hwnd: HWND) -> Result<(), String> {
     if !hwnd.0.is_null() {
         let _ = ShowWindow(hwnd, SW_HIDE);

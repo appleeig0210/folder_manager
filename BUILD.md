@@ -1,64 +1,56 @@
 # 人物資料夾管理器 v2 — 建置指南
 
-Web Shell 架構：**FastAPI 後端** + **React 前端** + **Tauri / pywebview 殼層**。
+**桌面優先**：主要使用與開發路徑為 Tauri 桌面版。平台策略與功能矩陣見 [docs/DESKTOP_FIRST.md](docs/DESKTOP_FIRST.md)。
+
+架構：**FastAPI 後端** + **React 前端** + **Tauri 殼層**（WebView2）。
 
 ## 環境需求
 
 - Python 3.10+
 - Node.js 20+
-- （可選）Rust 1.77+ — 僅 Tauri 原生打包需要
+- Rust 1.77+ — Tauri 桌面版需要
+- （可選）mpv — B2 內嵌影片播放，見 `scripts/install_mpv.ps1`
 
-## 快速開始（開發）
-
-```bash
-# 1. 安裝 Python 依賴
-cd folder_manage
-pip install -r requirements.txt
-
-# 2. 安裝前端依賴
-cd ../frontend
-npm install
-
-# 3. 啟動後端與前端（兩個終端）
-cd ../folder_manage
-python -m api.main
-
-cd ../frontend
-npm run dev
-```
-
-瀏覽器開啟 http://localhost:5173（API 代理至 http://127.0.0.1:8765）。
-
-或使用根目錄腳本（需先 `npm install` 於根目錄以安裝 concurrently）：
-
-```bash
-npm install
-npm run dev
-```
-
-## 生產模式（pywebview 桌面視窗）
-
-```bash
-cd frontend && npm run build
-cd ..
-pip install pywebview
-python scripts/launch_app.py
-```
-
-會啟動 API 並以原生 WebView 視窗開啟 `frontend/dist`。
-
-## Tauri 原生打包（需 Rust）
-
-1. 安裝 [Rust](https://rustup.rs/) 與 [Tauri 先決條件](https://v2.tauri.app/start/prerequisites/)
-2. 安裝 Node 依賴並產生圖示：
+## 快速開始（桌面版 · 推薦）
 
 ```bash
 npm install
 npm install --prefix frontend
+npm run tauri:dev
+```
+
+會啟動 Vite、Python API（8765）、Tauri 視窗。影片播放優先 mpv → `asset://` → HTTP。
+
+## 瀏覽器開發模式（次要）
+
+僅供 UI 調試，功能受限（無 mpv、無 asset、無原生拖曳）：
+
+```bash
+# 終端 1
+cd folder_manage && pip install -r requirements.txt && python -m api.main
+
+# 終端 2
+cd frontend && npm install && npm run dev
+```
+
+瀏覽器開啟 http://localhost:5173。頂部會顯示功能受限提示。
+
+或使用根目錄（需 `npm install` 安裝 concurrently）：
+
+```bash
+npm run dev
+```
+
+## Tauri 正式打包
+
+1. 安裝 [Rust](https://rustup.rs/) 與 [Tauri 先決條件](https://v2.tauri.app/start/prerequisites/)
+2. 產生圖示：
+
+```bash
 npm run icons
 ```
 
-3. 建置 Python API sidecar（依平台）：
+3. 建置 Python API sidecar：
 
 Windows：
 
@@ -72,12 +64,7 @@ macOS：
 npm run sidecar:mac
 ```
 
-macOS 會依目前 Rust host triple 產生 Tauri 需要的 sidecar 名稱，例如：
-
-- `src-tauri/bin/api-server-x86_64-apple-darwin`
-- `src-tauri/bin/api-server-aarch64-apple-darwin`
-
-4. 建置 Tauri：
+4. 建置安裝包：
 
 ```bash
 npm run tauri:build
@@ -87,13 +74,21 @@ npm run tauri:build
 
 ### macOS 注意事項
 
-- Intel Mac 與 Apple Silicon 需要分別在對應 runner/機器上建置 sidecar。
-- 本專案未設定 Apple Developer 簽章與 notarization；未簽章的 `.app`/`.dmg` 第一次開啟可能需要使用者在系統安全性設定中允許。
-- `tauri-plugin-drag` 支援 macOS，因此新程式的原生拖出檔案功能可隨 Tauri 版使用。
+- Intel / Apple Silicon 需分別建置對應 sidecar。
+- 未簽章的 `.app`/`.dmg` 首次開啟可能需在系統安全性設定中允許。
+- `tauri-plugin-drag` 支援 macOS 原生拖出檔案。
+
+## 舊版啟動器（pywebview）
+
+仍可使用，但新功能（mpv、asset 協議、診斷標籤）以 **Tauri** 為準：
+
+```bash
+cd frontend && npm run build
+pip install pywebview
+python scripts/launch_app.py
+```
 
 ## 舊版 CustomTkinter
-
-原桌面版仍可使用：
 
 ```bash
 cd folder_manage
@@ -113,13 +108,14 @@ python people_folder_manager.py
 | `PATCH /api/tags/filter` | 篩選與排序 |
 | `POST /api/files/*` | 檔案操作 |
 
-## 手動測試清單
+## 手動測試清單（桌面版）
 
+- [ ] `npm run tauri:dev` 啟動無誤
 - [ ] 設定主資料夾並刷新樹狀欄
 - [ ] 子資料夾卡片預覽與雙擊進入媒體
-- [ ] 麵包屑導覽與樹狀欄同步
+- [ ] 影片 lightbox：標籤顯示 `mpv 內嵌` 或 `本地 asset`
+- [ ] 全片 / 精細拖動條可操作，關閉 lightbox 與應用不卡住
 - [ ] 標籤 OR 篩選、媒體類型篩選
-- [ ] 多選（Ctrl/Shift）與批次轉移/刪除
-- [ ] 媒體燈箱 ←→ 鍵盤切換
+- [ ] 多選與批次轉移/刪除
+- [ ] 原生拖出檔案（Tauri）
 - [ ] 標籤 JSON/CSV 匯入匯出
-- [ ] 200+ 媒體項目滾動流暢度

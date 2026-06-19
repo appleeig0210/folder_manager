@@ -1,5 +1,5 @@
 import type { MediaPlaybackSource } from './mediaPlayback'
-import { isDesktopApp } from './platform'
+import { isDesktopApp, WEB_LIMITATIONS } from './platform'
 
 export type VideoPlaybackMode =
   | 'detecting'
@@ -72,7 +72,7 @@ export function getVideoPlaybackModeInfo(input: {
     return {
       mode: 'web-http',
       label: '網頁 HTTP',
-      hint: '瀏覽器模式，經 API 串流',
+      hint: WEB_LIMITATIONS.note,
       tone: 'warn',
     }
   }

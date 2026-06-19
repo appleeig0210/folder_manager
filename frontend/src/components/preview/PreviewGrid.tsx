@@ -3,7 +3,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { EntryItem, MediaItem, ViewMode } from '../../api/types'
 import { EntryCard } from './EntryCard'
 import { MediaCard } from './MediaCard'
-import { isTauriRuntime, startNativeFileDrag } from '../../lib/nativeDrag'
+import { supportsNativeFileDrag } from '../../lib/platform'
+import { startNativeFileDrag } from '../../lib/nativeDrag'
 
 const CARD_WIDTH = 220
 const CARD_GAP = 16
@@ -67,7 +68,7 @@ export function PreviewGrid({
   const items = viewMode === 'entries' ? entries : media
   const rowHeight = viewMode === 'entries' ? ENTRY_HEIGHT : MEDIA_HEIGHT
   const isDraggingSelectedGroup = dragId !== null && selectedIds.has(dragId) && selectedIds.size > 1
-  const nativeFileDragEnabled = isTauriRuntime()
+  const nativeFileDragEnabled = supportsNativeFileDrag()
 
   useLayoutEffect(() => {
     const parent = parentRef.current
