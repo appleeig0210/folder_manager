@@ -49,6 +49,8 @@ pub fn run() {
             mpv::mpv_set_bounds,
             mpv::mpv_seek,
             mpv::mpv_set_paused,
+            mpv::mpv_set_volume,
+            mpv::mpv_set_muted,
             mpv::mpv_get_time,
             mpv::mpv_get_duration,
             mpv::mpv_detach,

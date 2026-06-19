@@ -1,12 +1,17 @@
 import type { PointerEvent as ReactPointerEvent } from 'react'
 
-/** macOS WebKit 在 range 拖曳時常回報 buttons=0，需以 scrubbing 狀態判斷是否仍應更新。 */
+/** macOS WebKit 在 range 拖曳時常回報 buttons=0，需以 pointer 按下狀態判斷是否仍應更新。 */
 export function shouldHandleScrubPointerMove(
   event: ReactPointerEvent<HTMLInputElement>,
-  isScrubbing: boolean,
+  isPointerActive: boolean,
 ): boolean {
-  if (isScrubbing) return true
+  if (isPointerActive) return true
   return event.buttons !== 0
+}
+
+/** 阻擋 macOS WebKit 在放開滑鼠後仍由原生 range 觸發的幽靈 input 事件。 */
+export function shouldHandleScrubInput(isPointerActive: boolean): boolean {
+  return isPointerActive
 }
 
 export function readRangeSeconds(event: { currentTarget: HTMLInputElement }): number {

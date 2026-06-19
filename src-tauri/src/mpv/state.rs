@@ -137,6 +137,14 @@ pub fn set_paused(state: &MpvState, paused: bool) -> Result<(), String> {
     with_ipc(state, |ipc| ipc.set_paused(paused))
 }
 
+pub fn set_volume(state: &MpvState, volume: f64) -> Result<(), String> {
+    with_ipc(state, |ipc| ipc.set_volume(volume))
+}
+
+pub fn set_muted(state: &MpvState, muted: bool) -> Result<(), String> {
+    with_ipc(state, |ipc| ipc.set_muted(muted))
+}
+
 pub fn get_time(state: &MpvState) -> Result<f64, String> {
     if !state.0.lock().map(|g| g.is_some()).unwrap_or(false) {
         return Ok(0.0);

@@ -70,6 +70,18 @@ pub async fn mpv_get_duration() -> Result<f64, InvokeError> {
 
 #[cfg(not(windows))]
 #[tauri::command]
+pub async fn mpv_set_volume(_volume: f64) -> Result<(), InvokeError> {
+    Err("mpv embedding is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn mpv_set_muted(_muted: bool) -> Result<(), InvokeError> {
+    Err("mpv embedding is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
 pub async fn mpv_detach() -> Result<(), InvokeError> {
     Ok(())
 }

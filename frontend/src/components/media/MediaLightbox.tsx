@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
 import { prepareStreamableVideo, resolveMediaPlaybackSource, type MediaPlaybackSource } from '../../lib/mediaPlayback'
-import { isNativeMpvAvailable, mpvDetach, mpvGetDuration, mpvGetTime, mpvSeek, mpvSetPaused } from '../../lib/mpvPlayer'
+import { isNativeMpvAvailable, mpvDetach, mpvGetDuration, mpvGetTime, mpvSeek, mpvSetMuted, mpvSetPaused, mpvSetVolume } from '../../lib/mpvPlayer'
 import { getMpvScrubProfile, getVideoScrubProfile, isDesktopApp, shouldProbeNativeMpv, shouldUseServerFrameExtract, type VideoScrubProfile } from '../../lib/platform'
 import { getVideoPlaybackModeInfo, playbackModeBadgeClass } from '../../lib/playbackDiagnostics'
 import { WebVideoNotice } from './WebVideoNotice'
@@ -14,10 +14,13 @@ import {
   coarseScrubProgress,
   fineScrubProgress,
   readRangeSeconds,
+  shouldHandleScrubInput,
   shouldHandleScrubPointerMove,
   syncScrubRangeVisual,
 } from './videoScrub'
 import { Button } from '../ui/Button'
+import { VideoVolumeControl } from './VideoVolumeControl'
+import { clampVideoVolume, loadStoredVideoVolume, saveStoredVideoVolume } from '../../lib/videoVolume'
 
 const VIDEO_SEEK_STEP_SECONDS = 1 / 30
 const VIDEO_HOLD_SEEK_STEP_SECONDS = 1 / 60
@@ -46,6 +49,8 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const [scrubMode, setScrubMode] = useState<'coarse' | 'fine' | null>(null)
   const [scrubDraftTime, setScrubDraftTime] = useState<number | null>(null)
   const [videoPlayback, setVideoPlayback] = useState<MediaPlaybackSource | null>(null)
+  const [videoVolume, setVideoVolume] = useState(loadStoredVideoVolume)
+  const [videoMuted, setVideoMuted] = useState(false)
   const [mpvMode, setMpvMode] = useState(false)
   const [mpvReady, setMpvReady] = useState(false)
   const [mpvProbeDone, setMpvProbeDone] = useState(false)
@@ -60,6 +65,8 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const pendingFineSeekRef = useRef<number | null>(null)
   const lastFinePreviewAtRef = useRef(0)
   const scrubbingRef = useRef(false)
+  const scrubPointerActiveRef = useRef(false)
+  const activeScrubInputRef = useRef<HTMLInputElement | null>(null)
   const scrubDraftRef = useRef<number | null>(null)
   const resumeAfterScrubRef = useRef(false)
   const seekingRef = useRef(false)
@@ -241,6 +248,40 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       video.pause()
     }
   }, [item])
+
+  const applyVideoVolume = useCallback((volume: number, muted: boolean) => {
+    const clamped = clampVideoVolume(volume)
+    if (mpvModeRef.current && mpvReadyRef.current) {
+      void mpvSetMuted(muted)
+      if (!muted) void mpvSetVolume(Math.round(clamped * 100))
+    }
+    const video = videoRef.current
+    if (video) {
+      video.muted = muted
+      video.volume = clamped
+    }
+  }, [])
+
+  const changeVideoVolume = useCallback((nextVolume: number) => {
+    const clamped = clampVideoVolume(nextVolume)
+    setVideoVolume(clamped)
+    saveStoredVideoVolume(clamped)
+    if (clamped > 0) {
+      setVideoMuted(false)
+      applyVideoVolume(clamped, false)
+      return
+    }
+    setVideoMuted(true)
+    applyVideoVolume(clamped, true)
+  }, [applyVideoVolume])
+
+  const toggleVideoMute = useCallback(() => {
+    setVideoMuted((prev) => {
+      const next = !prev
+      applyVideoVolume(videoVolume, next)
+      return next
+    })
+  }, [applyVideoVolume, videoVolume])
 
   const applyPlaybackSeek = useCallback((seconds: number, syncState = true) => {
     if (!mpvModeRef.current || !mpvReadyRef.current) return false
@@ -457,6 +498,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     seekTokenRef.current += 1
     scrubSeekingRef.current = false
     scrubbingRef.current = false
+    scrubPointerActiveRef.current = false
     scrubModeRef.current = null
     setScrubMode(null)
     stopCoarsePreview()
@@ -467,6 +509,10 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     lastAppliedScrubSeekRef.current = null
     setFineSeekCenter(nextTime)
     applySeek(nextTime, true, true)
+    if (activeScrubInputRef.current) {
+      activeScrubInputRef.current.blur()
+      activeScrubInputRef.current = null
+    }
     if (resumeAfterScrubRef.current) {
       window.setTimeout(() => {
         if (mpvModeRef.current && mpvReadyRef.current) {
@@ -499,9 +545,22 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     event: React.PointerEvent<HTMLInputElement>,
     preview: (seconds: number, input: HTMLInputElement) => void,
   ) => {
-    if (!shouldHandleScrubPointerMove(event, scrubbingRef.current)) return
+    if (!shouldHandleScrubPointerMove(event, scrubPointerActiveRef.current)) return
     preview(readRangeSeconds(event), event.currentTarget)
   }, [])
+
+  const endScrubFromInput = useCallback((
+    event: { currentTarget: HTMLInputElement; pointerId?: number },
+  ) => {
+    if (!scrubbingRef.current) return
+    if (
+      event.pointerId !== undefined &&
+      event.currentTarget.hasPointerCapture(event.pointerId)
+    ) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    finishScrub(readRangeSeconds(event))
+  }, [finishScrub])
 
   const previewFineSeek = useCallback((seconds: number, input?: HTMLInputElement | null) => {
     syncScrubDraft(seconds)
@@ -599,11 +658,13 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     setScrubMode(null)
     setScrubDraftTime(null)
     scrubbingRef.current = false
+    scrubPointerActiveRef.current = false
     scrubModeRef.current = null
     scrubSeekingRef.current = false
     scrubDraftRef.current = null
     lastAppliedScrubSeekRef.current = null
     resumeAfterScrubRef.current = false
+    activeScrubInputRef.current = null
     stopCoarsePreview()
     stopFinePreview()
   }, [item?.id, stopCoarsePreview, stopFinePreview, stopHoldSeek])
@@ -613,6 +674,11 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       ? getMpvScrubProfile()
       : getVideoScrubProfile(videoPlayback)
   }, [mpvMode, mpvReady, videoPlayback])
+
+  useEffect(() => {
+    if (item?.media_type !== 'video') return
+    applyVideoVolume(videoVolume, videoMuted)
+  }, [applyVideoVolume, item?.id, mpvReady, videoMuted, videoPlayback?.src, videoVolume])
 
   useEffect(() => {
     if (item?.media_type !== 'video') {
@@ -699,11 +765,13 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       const next = scrubDraftRef.current ?? readVideoTime()
       finishScrub(next)
     }
-    window.addEventListener('pointerup', onRelease)
-    window.addEventListener('pointercancel', onRelease)
+    document.addEventListener('pointerup', onRelease, true)
+    document.addEventListener('pointercancel', onRelease, true)
+    document.addEventListener('mouseup', onRelease, true)
     return () => {
-      window.removeEventListener('pointerup', onRelease)
-      window.removeEventListener('pointercancel', onRelease)
+      document.removeEventListener('pointerup', onRelease, true)
+      document.removeEventListener('pointercancel', onRelease, true)
+      document.removeEventListener('mouseup', onRelease, true)
     }
   }, [finishScrub, readVideoTime])
 
@@ -946,7 +1014,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
               {videoDuration > 0 && (
                 <div className="flex items-center gap-3">
                   <span className="w-[7.5rem] shrink-0 text-[11px] leading-snug text-white/45">
-                    全片時間軸（快速定位 · 連續拖拉）
+                    全片時間軸
                   </span>
                   <div className="video-scrub-range-wrap min-w-0 flex-1">
                     <div className="video-scrub-range-track" aria-hidden>
@@ -968,19 +1036,19 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                       value={coarseSeekValue}
                       onPointerDown={(event) => {
                         event.currentTarget.setPointerCapture(event.pointerId)
+                        activeScrubInputRef.current = event.currentTarget
+                        scrubPointerActiveRef.current = true
                         startCoarseScrub()
                       }}
                       onPointerMove={(event) => handleScrubPointerMove(event, previewCoarseSeek)}
-                      onPointerUp={(event) => {
-                        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                          event.currentTarget.releasePointerCapture(event.pointerId)
-                        }
-                        finishScrub(readRangeSeconds(event))
+                      onPointerUp={endScrubFromInput}
+                      onPointerCancel={endScrubFromInput}
+                      onMouseUp={endScrubFromInput}
+                      onLostPointerCapture={endScrubFromInput}
+                      onInput={(event) => {
+                        if (!shouldHandleScrubInput(scrubPointerActiveRef.current)) return
+                        previewCoarseSeek(readRangeSeconds(event), event.currentTarget)
                       }}
-                      onPointerCancel={(event) => {
-                        finishScrub(readRangeSeconds(event))
-                      }}
-                      onInput={(event) => previewCoarseSeek(readRangeSeconds(event), event.currentTarget)}
                       className="video-scrub-range w-full"
                       aria-label="全片時間軸"
                     />
@@ -989,7 +1057,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
               )}
               <div className="flex items-center gap-3">
                 <span className="w-[7.5rem] shrink-0 text-[11px] leading-snug text-white/45">
-                  精細微調（前後 {FINE_SEEK_WINDOW_SECONDS} 秒 · 毫秒級）
+                  精細微調
                 </span>
                 <div className="flex min-w-0 flex-1 items-center gap-2">
                 <button
@@ -1034,19 +1102,19 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                     value={fineSeekValue}
                     onPointerDown={(event) => {
                       event.currentTarget.setPointerCapture(event.pointerId)
+                      activeScrubInputRef.current = event.currentTarget
+                      scrubPointerActiveRef.current = true
                       startFineScrub()
                     }}
                     onPointerMove={(event) => handleScrubPointerMove(event, previewFineSeek)}
-                    onPointerUp={(event) => {
-                      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                        event.currentTarget.releasePointerCapture(event.pointerId)
-                      }
-                      finishScrub(readRangeSeconds(event))
+                    onPointerUp={endScrubFromInput}
+                    onPointerCancel={endScrubFromInput}
+                    onMouseUp={endScrubFromInput}
+                    onLostPointerCapture={endScrubFromInput}
+                    onInput={(event) => {
+                      if (!shouldHandleScrubInput(scrubPointerActiveRef.current)) return
+                      previewFineSeek(readRangeSeconds(event), event.currentTarget)
                     }}
-                    onPointerCancel={(event) => {
-                      finishScrub(readRangeSeconds(event))
-                    }}
-                    onInput={(event) => previewFineSeek(readRangeSeconds(event), event.currentTarget)}
                     className="video-scrub-range video-scrub-range--fine w-full"
                     aria-label="精細調整影片時間"
                   />
@@ -1073,6 +1141,14 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                 >
                   +1s
                 </button>
+                <VideoVolumeControl
+                  className="ml-1 w-[6.5rem] shrink-0 border-l border-white/10 pl-2"
+                  volume={videoVolume}
+                  muted={videoMuted}
+                  onVolumeChange={changeVideoVolume}
+                  onToggleMute={toggleVideoMute}
+                  showPercent={false}
+                />
                 </div>
               </div>
             </div>

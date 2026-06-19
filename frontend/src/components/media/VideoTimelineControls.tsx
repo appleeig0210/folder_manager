@@ -1,6 +1,7 @@
 import { memo, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import {
   readRangeSeconds,
+  shouldHandleScrubInput,
   syncScrubRangeVisual,
   coarseScrubProgress,
   fineScrubProgress,
@@ -39,7 +40,9 @@ export interface VideoTimelineControlsProps {
   onPreviewCoarseSeek: (seconds: number) => void
   onStartFineScrub: () => void
   onPreviewFineSeek: (seconds: number) => void
-  onFinishScrub: (seconds: number) => void
+  onScrubPointerActivate: (input: HTMLInputElement) => void
+  onEndScrubFromInput: (event: { currentTarget: HTMLInputElement; pointerId?: number }) => void
+  isScrubPointerActive: () => boolean
   onScrubPointerMove: (
     event: ReactPointerEvent<HTMLInputElement>,
     preview: (seconds: number, input: HTMLInputElement) => void,
@@ -61,7 +64,9 @@ export const VideoTimelineControls = memo(function VideoTimelineControls({
   onPreviewCoarseSeek,
   onStartFineScrub,
   onPreviewFineSeek,
-  onFinishScrub,
+  onScrubPointerActivate,
+  onEndScrubFromInput,
+  isScrubPointerActive,
   onScrubPointerMove,
   onSeekVideoTo,
   readVideoTime,
@@ -76,7 +81,7 @@ export const VideoTimelineControls = memo(function VideoTimelineControls({
         {videoDuration > 0 && (
           <div className="flex items-center gap-3">
             <span className="w-[7.5rem] shrink-0 text-[11px] leading-snug text-white/45">
-              全片時間軸（快速定位 · 連續拖拉）
+              全片時間軸
             </span>
             <div className="video-scrub-range-wrap min-w-0 flex-1">
               <div className="video-scrub-range-track" aria-hidden>
@@ -98,19 +103,16 @@ export const VideoTimelineControls = memo(function VideoTimelineControls({
                 value={coarseSeekValue}
                 onPointerDown={(event) => {
                   event.currentTarget.setPointerCapture(event.pointerId)
+                  onScrubPointerActivate(event.currentTarget)
                   onStartCoarseScrub()
                 }}
                 onPointerMove={(event) => onScrubPointerMove(event, onPreviewCoarseSeek)}
-                onPointerUp={(event) => {
-                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                    event.currentTarget.releasePointerCapture(event.pointerId)
-                  }
-                  onFinishScrub(readRangeSeconds(event))
-                }}
-                onPointerCancel={(event) => {
-                  onFinishScrub(readRangeSeconds(event))
-                }}
+                onPointerUp={onEndScrubFromInput}
+                onPointerCancel={onEndScrubFromInput}
+                onMouseUp={onEndScrubFromInput}
+                onLostPointerCapture={onEndScrubFromInput}
                 onInput={(event) => {
+                  if (!shouldHandleScrubInput(isScrubPointerActive())) return
                   const seconds = readRangeSeconds(event)
                   syncScrubRangeVisual(event.currentTarget, coarseScrubProgress(seconds, videoDuration))
                   onPreviewCoarseSeek(seconds)
@@ -123,7 +125,7 @@ export const VideoTimelineControls = memo(function VideoTimelineControls({
         )}
         <div className="flex items-center gap-3">
           <span className="w-[7.5rem] shrink-0 text-[11px] leading-snug text-white/45">
-            精細微調（前後 {FINE_SEEK_WINDOW_SECONDS} 秒 · 毫秒級）
+            精細微調
           </span>
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <button
@@ -168,19 +170,16 @@ export const VideoTimelineControls = memo(function VideoTimelineControls({
                 value={fineSeekValue}
                 onPointerDown={(event) => {
                   event.currentTarget.setPointerCapture(event.pointerId)
+                  onScrubPointerActivate(event.currentTarget)
                   onStartFineScrub()
                 }}
                 onPointerMove={(event) => onScrubPointerMove(event, onPreviewFineSeek)}
-                onPointerUp={(event) => {
-                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                    event.currentTarget.releasePointerCapture(event.pointerId)
-                  }
-                  onFinishScrub(readRangeSeconds(event))
-                }}
-                onPointerCancel={(event) => {
-                  onFinishScrub(readRangeSeconds(event))
-                }}
+                onPointerUp={onEndScrubFromInput}
+                onPointerCancel={onEndScrubFromInput}
+                onMouseUp={onEndScrubFromInput}
+                onLostPointerCapture={onEndScrubFromInput}
                 onInput={(event) => {
+                  if (!shouldHandleScrubInput(isScrubPointerActive())) return
                   const seconds = readRangeSeconds(event)
                   syncScrubRangeVisual(event.currentTarget, fineScrubProgress(seconds, fineSeekStart, fineSeekEnd))
                   onPreviewFineSeek(seconds)

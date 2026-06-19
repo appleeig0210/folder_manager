@@ -6,8 +6,9 @@ use windows::Win32::Foundation::HWND;
 use crate::mpv::player::MpvBounds;
 use crate::mpv::state::{
     create_surface_on_parent, destroy_surface, detach_session_fast, detach_session_for_ui,
-    get_duration, get_time, kill_session, resolve_mpv_executable, seek, set_bounds, set_paused,
-    start_mpv_process, store_session, take_session, update_surface_bounds, MpvState,
+    get_duration, get_time, kill_session, resolve_mpv_executable, seek, set_bounds, set_muted,
+    set_paused, set_volume, start_mpv_process, store_session, take_session, update_surface_bounds,
+    MpvState,
 };
 
 fn hwnd_from_isize(raw: isize) -> HWND {
@@ -94,6 +95,16 @@ pub async fn mpv_seek(seconds: f64, state: State<'_, MpvState>) -> Result<(), St
 #[tauri::command]
 pub async fn mpv_set_paused(paused: bool, state: State<'_, MpvState>) -> Result<(), String> {
     set_paused(state.inner(), paused)
+}
+
+#[tauri::command]
+pub async fn mpv_set_volume(volume: f64, state: State<'_, MpvState>) -> Result<(), String> {
+    set_volume(state.inner(), volume)
+}
+
+#[tauri::command]
+pub async fn mpv_set_muted(muted: bool, state: State<'_, MpvState>) -> Result<(), String> {
+    set_muted(state.inner(), muted)
 }
 
 #[tauri::command]

@@ -57,6 +57,18 @@ impl MpvIpc {
         }))
     }
 
+    pub fn set_volume(&self, volume: f64) -> Result<(), String> {
+        self.send_command(&serde_json::json!({
+            "command": ["set_property", "volume", volume]
+        }))
+    }
+
+    pub fn set_muted(&self, muted: bool) -> Result<(), String> {
+        self.send_command(&serde_json::json!({
+            "command": ["set_property", "mute", muted]
+        }))
+    }
+
     pub fn get_time_pos(&self) -> Result<f64, String> {
         self.request_number(&serde_json::json!({
             "command": ["get_property", "time-pos"]

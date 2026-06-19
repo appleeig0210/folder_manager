@@ -69,6 +69,24 @@ export async function mpvSetPaused(paused: boolean): Promise<void> {
   await invoke('mpv_set_paused', { paused })
 }
 
+export async function mpvSetVolume(volume: number): Promise<void> {
+  if (!shouldProbeNativeMpv()) return
+  try {
+    await invoke('mpv_set_volume', { volume: Math.min(100, Math.max(0, volume)) })
+  } catch {
+    // mpv unavailable
+  }
+}
+
+export async function mpvSetMuted(muted: boolean): Promise<void> {
+  if (!shouldProbeNativeMpv()) return
+  try {
+    await invoke('mpv_set_muted', { muted })
+  } catch {
+    // mpv unavailable
+  }
+}
+
 export async function mpvGetTime(): Promise<number> {
   return invoke<number>('mpv_get_time')
 }
