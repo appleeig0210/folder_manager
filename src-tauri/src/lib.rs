@@ -6,6 +6,8 @@ use tauri::Manager;
 #[cfg(not(debug_assertions))]
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
+mod mpv;
+
 #[cfg(not(debug_assertions))]
 mod sidecar_lifecycle;
 
@@ -30,6 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_shell::init())
+        .manage(mpv::MpvState(std::sync::Mutex::new(None)))
         .setup(|_app| {
             #[cfg(not(debug_assertions))]
             {
@@ -40,25 +43,32 @@ pub fn run() {
             }
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            mpv::mpv_is_available,
+            mpv::mpv_attach,
+            mpv::mpv_set_bounds,
+            mpv::mpv_seek,
+            mpv::mpv_set_paused,
+            mpv::mpv_get_time,
+            mpv::mpv_get_duration,
+            mpv::mpv_detach,
+        ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
-        #[cfg(not(debug_assertions))]
-        match event {
-            tauri::RunEvent::Exit => cleanup_api_sidecar(app_handle),
-            tauri::RunEvent::ExitRequested { .. } => cleanup_api_sidecar(app_handle),
-            tauri::RunEvent::WindowEvent {
-                event: tauri::WindowEvent::CloseRequested { .. },
-                ..
-            } => cleanup_api_sidecar(app_handle),
-            _ => {}
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            let _ = app_handle;
-            let _ = event;
+        if matches!(
+            event,
+            tauri::RunEvent::Exit
+                | tauri::RunEvent::ExitRequested { .. }
+                | tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::CloseRequested { .. },
+                    ..
+                }
+        ) {
+            mpv::cleanup_on_exit(app_handle);
+            #[cfg(not(debug_assertions))]
+            cleanup_api_sidecar(app_handle);
         }
     });
 }

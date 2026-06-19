@@ -2235,6 +2235,8 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-drag",
  "tauri-plugin-shell",
+ "tokio",
+ "windows 0.61.3",
 ]
 
 [[package]]

@@ -56,3 +56,16 @@ export function getVideoScrubProfile(playback: MediaPlaybackSource | null): Vide
 export function shouldUseServerFrameExtract(): boolean {
   return isDesktopApp()
 }
+
+const DESKTOP_MPV_SCRUB_PROFILE: VideoScrubProfile = {
+  coarsePreviewMs: 32,
+  finePreviewMs: 24,
+  minDeltaSeconds: 0.01,
+  waitForSeeked: false,
+  preload: 'auto',
+  showNativeControls: false,
+}
+
+export function getMpvScrubProfile(): VideoScrubProfile {
+  return DESKTOP_MPV_SCRUB_PROFILE
+}

@@ -1,10 +1,13 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { ChevronLeft, ChevronRight, ExternalLink, X } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
 import { prepareStreamableVideo, resolveMediaPlaybackSource, type MediaPlaybackSource } from '../../lib/mediaPlayback'
-import { getVideoScrubProfile, shouldUseServerFrameExtract, type VideoScrubProfile } from '../../lib/platform'
+import { isNativeMpvAvailable, mpvDetach, mpvGetDuration, mpvGetTime, mpvSeek, mpvSetPaused } from '../../lib/mpvPlayer'
+import { getMpvScrubProfile, getVideoScrubProfile, shouldUseServerFrameExtract, type VideoScrubProfile } from '../../lib/platform'
+import { getVideoPlaybackModeInfo, playbackModeBadgeClass } from '../../lib/playbackDiagnostics'
+import { MpvVideoSurface } from './MpvVideoSurface'
 import { disposeVideoElement } from './videoUtils'
 import { Button } from '../ui/Button'
 
@@ -35,6 +38,9 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const [scrubMode, setScrubMode] = useState<'coarse' | 'fine' | null>(null)
   const [scrubDraftTime, setScrubDraftTime] = useState<number | null>(null)
   const [videoPlayback, setVideoPlayback] = useState<MediaPlaybackSource | null>(null)
+  const [mpvMode, setMpvMode] = useState(false)
+  const [mpvReady, setMpvReady] = useState(false)
+  const [mpvProbeDone, setMpvProbeDone] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const savingFrameRef = useRef(false)
@@ -54,13 +60,20 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const scrubModeRef = useRef<'coarse' | 'fine' | null>(null)
   const lastAppliedScrubSeekRef = useRef<number | null>(null)
   const scrubProfileRef = useRef<VideoScrubProfile>(getVideoScrubProfile(null))
+  const mpvModeRef = useRef(false)
+  const mpvReadyRef = useRef(false)
+  const mpvPausedRef = useRef(false)
+  const lastPolledMpvTimeRef = useRef(0)
+  const [mpvLayoutRevision, setMpvLayoutRevision] = useState(0)
   const activeItemIdRef = useRef(items[initialIndex]?.id)
   const activeIndex = activeItemIdRef.current
     ? items.findIndex((candidate) => candidate.id === activeItemIdRef.current)
     : -1
   const resolvedIndex = activeIndex >= 0 ? activeIndex : Math.min(index, Math.max(0, items.length - 1))
   const item = items[resolvedIndex]
-  const playbackProfile = getVideoScrubProfile(videoPlayback)
+  const playbackProfile = mpvMode && mpvReady
+    ? getMpvScrubProfile()
+    : getVideoScrubProfile(videoPlayback)
   const displayedTime = scrubDraftTime ?? videoTime
   const fineSeekAnchor = scrubbing && scrubMode === 'coarse'
     ? displayedTime
@@ -75,6 +88,10 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const fineSeekProgress = fineSeekEnd > fineSeekStart
     ? ((fineSeekValue - fineSeekStart) / (fineSeekEnd - fineSeekStart)) * 100
     : 0
+  const playbackModeInfo = useMemo(() => {
+    if (item?.media_type !== 'video') return null
+    return getVideoPlaybackModeInfo({ mpvProbeDone, mpvMode, mpvReady, videoPlayback })
+  }, [item?.media_type, mpvProbeDone, mpvMode, mpvReady, videoPlayback])
 
   const selectIndex = useCallback((nextIndex: number) => {
     const nextItem = items[nextIndex]
@@ -154,8 +171,59 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     }
   }, [captureVideoFrame, item, onFrameSaved, onStatus, videoTime])
 
+  const handleMpvReady = useCallback(() => {
+    mpvReadyRef.current = true
+    setMpvReady(true)
+    setLoaded(true)
+    mpvPausedRef.current = false
+    setMpvLayoutRevision((value) => value + 1)
+    void mpvGetDuration()
+      .then((duration) => {
+        if (Number.isFinite(duration) && duration > 0) setVideoDuration(duration)
+      })
+      .catch(() => {})
+    void mpvGetTime()
+      .then((current) => {
+        if (Number.isFinite(current)) {
+          lastPolledMpvTimeRef.current = current
+          setVideoTime(current)
+          setFineSeekCenter(current)
+        }
+      })
+      .catch(() => {})
+    window.requestAnimationFrame(() => {
+      setMpvLayoutRevision((value) => value + 1)
+    })
+  }, [])
+
+  const handleMpvError = useCallback((message: string) => {
+    if (!item) return
+    console.warn('mpv attach failed, falling back to HTML video:', message)
+    mpvModeRef.current = false
+    mpvReadyRef.current = false
+    setMpvMode(false)
+    setMpvReady(false)
+    prepareStreamableVideo(item.path)
+    void resolveMediaPlaybackSource(item.path).then(setVideoPlayback)
+  }, [item])
+
+  const handleClose = useCallback(() => {
+    mpvReadyRef.current = false
+    mpvModeRef.current = false
+    setMpvReady(false)
+    void mpvDetach().catch(() => {})
+    onClose()
+  }, [onClose])
+
   const toggleVideoPlayback = useCallback(() => {
     if (!item || item.media_type !== 'video' || scrubbingRef.current) return
+
+    if (mpvModeRef.current && mpvReadyRef.current) {
+      mpvPausedRef.current = !mpvPausedRef.current
+      void mpvSetPaused(mpvPausedRef.current)
+      return
+    }
+
     const video = videoRef.current
     if (!video) return
 
@@ -166,21 +234,36 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     }
   }, [item])
 
+  const applyPlaybackSeek = useCallback((seconds: number, syncState = true) => {
+    if (!mpvModeRef.current || !mpvReadyRef.current) return false
+    void mpvSeek(seconds)
+    if (syncState) setVideoTime(seconds)
+    return true
+  }, [])
+
   const applySeek = useCallback((
     seconds: number,
     recenter = !scrubbingRef.current,
     syncState = true,
   ) => {
     if (!item || item.media_type !== 'video') return
+
+    const duration = videoDuration
+    const nextTime = Math.min(Math.max(seconds, 0), duration || Number.POSITIVE_INFINITY)
+
+    if (applyPlaybackSeek(nextTime, syncState)) {
+      if (recenter) setFineSeekCenter(nextTime)
+      return
+    }
+
     const video = videoRef.current
     if (!video) return
-
-    const duration = Number.isFinite(video.duration) ? video.duration : videoDuration
-    const nextTime = Math.min(Math.max(seconds, 0), duration || Number.POSITIVE_INFINITY)
-    video.currentTime = nextTime
-    if (syncState) setVideoTime(nextTime)
-    if (recenter) setFineSeekCenter(nextTime)
-  }, [item, videoDuration])
+    const resolvedDuration = Number.isFinite(video.duration) ? video.duration : videoDuration
+    const clamped = Math.min(Math.max(seconds, 0), resolvedDuration || Number.POSITIVE_INFINITY)
+    video.currentTime = clamped
+    if (syncState) setVideoTime(clamped)
+    if (recenter) setFineSeekCenter(clamped)
+  }, [applyPlaybackSeek, item, videoDuration])
 
   const seekVideoTo = useCallback((seconds: number, recenter = !scrubbingRef.current) => {
     applySeek(seconds, recenter)
@@ -199,14 +282,28 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     if (target === null) return
 
     const video = videoRef.current
-    if (!video || !item || item.media_type !== 'video') return
+    if (!mpvModeRef.current || !mpvReadyRef.current) {
+      if (!video || !item || item.media_type !== 'video') return
+    } else if (!item || item.media_type !== 'video') {
+      return
+    }
 
-    const baseline = lastAppliedScrubSeekRef.current ?? video.currentTime
+    const baseline = lastAppliedScrubSeekRef.current
+      ?? (mpvModeRef.current && mpvReadyRef.current
+        ? (scrubDraftRef.current ?? videoTime)
+        : (video?.currentTime ?? videoTime))
     if (Math.abs(target - baseline) < profile.minDeltaSeconds) return
 
-    const duration = Number.isFinite(video.duration) ? video.duration : videoDuration
+    const duration = videoDuration
     const nextTime = Math.min(Math.max(target, 0), duration || Number.POSITIVE_INFINITY)
     lastAppliedScrubSeekRef.current = nextTime
+
+    if (mpvModeRef.current && mpvReadyRef.current) {
+      void mpvSeek(nextTime)
+      return
+    }
+
+    if (!video) return
 
     if (!profile.waitForSeeked) {
       video.currentTime = nextTime
@@ -238,7 +335,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     video.addEventListener('seeked', releaseScrubSeek, { once: true })
     window.setTimeout(releaseScrubSeek, VIDEO_SEEK_SETTLE_TIMEOUT_MS)
     video.currentTime = nextTime
-  }, [item, videoDuration])
+  }, [item, videoDuration, videoTime])
 
   const stopCoarsePreview = useCallback(() => {
     if (coarsePreviewTimerRef.current !== null) {
@@ -304,8 +401,14 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     const current = readVideoTime()
     stopCoarsePreview()
     stopFinePreview()
-    resumeAfterScrubRef.current = Boolean(video && !video.paused)
-    video?.pause()
+    if (mpvModeRef.current && mpvReadyRef.current) {
+      resumeAfterScrubRef.current = !mpvPausedRef.current
+      mpvPausedRef.current = true
+      void mpvSetPaused(true)
+    } else {
+      resumeAfterScrubRef.current = Boolean(video && !video.paused)
+      video?.pause()
+    }
     scrubModeRef.current = 'coarse'
     setScrubMode('coarse')
     scrubbingRef.current = true
@@ -322,8 +425,14 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     const current = readVideoTime()
     stopCoarsePreview()
     stopFinePreview()
-    resumeAfterScrubRef.current = Boolean(video && !video.paused)
-    video?.pause()
+    if (mpvModeRef.current && mpvReadyRef.current) {
+      resumeAfterScrubRef.current = !mpvPausedRef.current
+      mpvPausedRef.current = true
+      void mpvSetPaused(true)
+    } else {
+      resumeAfterScrubRef.current = Boolean(video && !video.paused)
+      video?.pause()
+    }
     scrubModeRef.current = 'fine'
     setFineSeekCenter(current)
     setScrubMode('fine')
@@ -352,6 +461,11 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     applySeek(nextTime, true, true)
     if (resumeAfterScrubRef.current) {
       window.setTimeout(() => {
+        if (mpvModeRef.current && mpvReadyRef.current) {
+          mpvPausedRef.current = false
+          void mpvSetPaused(false)
+          return
+        }
         void videoRef.current?.play()
       }, 80)
     }
@@ -392,6 +506,14 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
 
   const seekVideo = useCallback((direction: -1 | 1, seconds: number) => {
     if (!item || item.media_type !== 'video' || seekingRef.current || scrubbingRef.current) return
+
+    if (mpvModeRef.current && mpvReadyRef.current) {
+      const duration = videoDuration > 0 ? videoDuration : Number.POSITIVE_INFINITY
+      const nextTime = Math.min(Math.max(videoTime + direction * seconds, 0), duration)
+      applySeek(nextTime)
+      return
+    }
+
     const video = videoRef.current
     if (!video) return
 
@@ -415,7 +537,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     video.currentTime = nextTime
     setVideoTime(nextTime)
     if (!scrubbingRef.current) setFineSeekCenter(nextTime)
-  }, [item])
+  }, [applySeek, item, videoDuration, videoTime])
 
   const stopHoldSeek = useCallback(() => {
     if (holdSeekTimerRef.current === null) return
@@ -473,30 +595,75 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   }, [item?.id, stopCoarsePreview, stopFinePreview, stopHoldSeek])
 
   useEffect(() => {
-    scrubProfileRef.current = getVideoScrubProfile(videoPlayback)
-  }, [videoPlayback])
+    scrubProfileRef.current = mpvMode && mpvReady
+      ? getMpvScrubProfile()
+      : getVideoScrubProfile(videoPlayback)
+  }, [mpvMode, mpvReady, videoPlayback])
 
   useEffect(() => {
     if (item?.media_type !== 'video') {
       setVideoPlayback(null)
+      setMpvMode(false)
+      setMpvReady(false)
+      setMpvProbeDone(false)
+      mpvModeRef.current = false
+      mpvReadyRef.current = false
       return
     }
 
     let cancelled = false
+    setMpvReady(false)
+    setMpvProbeDone(false)
     setVideoPlayback(null)
     setLoaded(false)
     setLoadError(false)
-    prepareStreamableVideo(item.path)
+    mpvReadyRef.current = false
+    mpvPausedRef.current = false
 
-    void resolveMediaPlaybackSource(item.path).then((source) => {
-      if (!cancelled) setVideoPlayback(source)
+    void isNativeMpvAvailable().then((available) => {
+      if (cancelled) return
+      setMpvProbeDone(true)
+      mpvModeRef.current = available
+      setMpvMode(available)
+      if (available) return
+      prepareStreamableVideo(item.path)
+      void resolveMediaPlaybackSource(item.path).then((source) => {
+        if (!cancelled) setVideoPlayback(source)
+      })
     })
 
     return () => {
       cancelled = true
       disposeVideoElement(videoRef.current)
+      void mpvDetach().catch(() => {})
     }
   }, [item?.id, item?.media_type, item?.path])
+
+  useEffect(() => {
+    if (!playbackModeInfo || item?.media_type !== 'video') return
+    console.info(`[播放診斷] ${playbackModeInfo.label} — ${playbackModeInfo.hint}`)
+  }, [item?.media_type, playbackModeInfo])
+
+  useEffect(() => {
+    if (!mpvMode || !mpvReady || scrubbing) return
+
+    const syncMpvClock = () => {
+      void mpvGetTime()
+        .then((current) => {
+          if (!scrubbingRef.current && Number.isFinite(current)) {
+            if (Math.abs(current - lastPolledMpvTimeRef.current) < 0.12) return
+            lastPolledMpvTimeRef.current = current
+            setVideoTime(current)
+            setFineSeekCenter(current)
+          }
+        })
+        .catch(() => {})
+    }
+
+    syncMpvClock()
+    const timerId = window.setInterval(syncMpvClock, 250)
+    return () => window.clearInterval(timerId)
+  }, [mpvMode, mpvReady, scrubbing])
 
   useEffect(() => {
     const onRelease = () => {
@@ -532,7 +699,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           return
         }
       }
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') handleClose()
       if (e.key === 'ArrowLeft') prev()
       if (e.key === 'ArrowRight') next()
       if (e.key === 'Enter') item && api.openPath(item.path)
@@ -557,7 +724,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       stopFinePreview()
     }
   }, [
-    onClose,
+    handleClose,
     prev,
     next,
     item,
@@ -582,12 +749,20 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-50 flex flex-col bg-black/92 outline-none"
       >
-        <div className="flex items-center justify-between px-4 py-3 text-white">
+        <div className="relative z-30 flex items-center justify-between px-4 py-3 text-white">
           <div className="min-w-0">
             <p className="text-sm font-semibold truncate">{item.name}</p>
             <p className="text-xs text-white/60">
               {resolvedIndex + 1} / {items.length} · {item.media_type === 'video' ? '影片' : '圖片'}
               {item.duration_label ? ` · ${item.duration_label}` : ''}
+              {playbackModeInfo ? (
+                <span
+                  className={`ml-2 inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium align-middle ${playbackModeBadgeClass(playbackModeInfo.tone)}`}
+                  title={playbackModeInfo.hint}
+                >
+                  {playbackModeInfo.label}
+                </span>
+              ) : null}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -601,7 +776,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
             </Button>
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               className="p-2 rounded-[var(--radius-sm)] hover:bg-white/10 text-white"
             >
               <X className="w-5 h-5" />
@@ -637,6 +812,17 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                   <p>無法直接載入原始檔，已改顯示預覽圖。</p>
                   <p className="mt-1 text-white/45">可按「以程式開啟」使用系統播放器或看圖工具。</p>
                 </div>
+              </div>
+            ) : item.media_type === 'video' && mpvMode ? (
+              <div className="h-full w-full min-h-0">
+                <MpvVideoSurface
+                  filePath={item.path}
+                  active
+                  layoutRevision={mpvLayoutRevision}
+                  className="h-full w-full max-h-full max-w-full rounded-[var(--radius-md)] bg-black shadow-2xl"
+                  onReady={handleMpvReady}
+                  onError={handleMpvError}
+                />
               </div>
             ) : item.media_type === 'video' && videoPlayback?.src ? (
               <motion.video
@@ -721,8 +907,8 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           </button>
         </div>
 
-        {item.media_type === 'video' && !loadError && videoPlayback?.src && (
-          <div className="px-6 pb-2 text-white">
+        {item.media_type === 'video' && !loadError && (mpvMode || mpvReady || videoPlayback?.src) && (
+          <div className="relative z-30 shrink-0 px-6 pb-2 text-white">
             <div className="mx-auto flex max-w-4xl flex-col gap-2 rounded-[var(--radius-md)] border border-white/10 bg-white/5 px-4 py-2">
               <div className="flex items-center justify-between gap-3 text-xs text-white/65">
                 <span>目前 {formatTimestampFine(displayedTime)}</span>
