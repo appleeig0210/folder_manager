@@ -32,7 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_shell::init())
-        .manage(mpv::MpvState(std::sync::Mutex::new(None)))
+        .manage(mpv::MpvState::default())
         .setup(|_app| {
             #[cfg(not(debug_assertions))]
             {

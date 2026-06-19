@@ -11,6 +11,12 @@ use crate::mpv::surface::{
 
 pub struct MpvState(pub Mutex<Option<MpvSession>>);
 
+impl Default for MpvState {
+    fn default() -> Self {
+        Self(Mutex::new(None))
+    }
+}
+
 pub fn resolve_mpv_executable() -> Option<std::path::PathBuf> {
     find_mpv_executable()
 }

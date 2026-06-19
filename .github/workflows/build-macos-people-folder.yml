@@ -64,7 +64,8 @@ jobs:
 
       - name: Build Tauri app
         run: |
-          npm run tauri:build
+          # CI 無 Finder/Automation 權限，bundle_dmg.sh 常失敗；產物以 .app 為主，後續再打包 zip。
+          npm run tauri:build -- --bundles app --no-sign
 
       - name: Show bundle output
         run: |
@@ -85,7 +86,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: PeopleFolderManager-${{ matrix.package_label }}
-          path: |
-            PeopleFolderManager-${{ matrix.package_label }}.zip
-            src-tauri/target/release/bundle/dmg/*.dmg
+          path: PeopleFolderManager-${{ matrix.package_label }}.zip
           retention-days: 1

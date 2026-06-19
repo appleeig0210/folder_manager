@@ -20,7 +20,8 @@ pub use state::MpvState;
 use tauri::ipc::InvokeError;
 
 #[cfg(not(windows))]
-pub struct MpvState(pub std::sync::Mutex<Option<()>>);
+#[derive(Default)]
+pub struct MpvState;
 
 #[cfg(not(windows))]
 pub fn cleanup_on_exit(_app: &tauri::AppHandle) {}
