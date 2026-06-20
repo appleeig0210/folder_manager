@@ -17,10 +17,18 @@ function delay(ms: number): Promise<void> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    ...init,
-  })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+      ...init,
+    })
+  } catch (error) {
+    const message = error instanceof TypeError && /load failed|failed to fetch/i.test(String(error))
+      ? '無法連線本機 API（127.0.0.1:8765）。若為 Mac 打包版，請重新安裝最新版；開發模式請確認已執行 python -m api.main。'
+      : String(error)
+    throw new Error(message)
+  }
   if (!res.ok) {
     const detail = await res.text()
     throw new Error(detail || res.statusText)

@@ -33,13 +33,29 @@ pub fn run() {
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_shell::init())
         .manage(mpv::MpvState::default())
-        .setup(|_app| {
+        .setup(|app| {
             #[cfg(not(debug_assertions))]
             {
                 sidecar_lifecycle::cleanup_stale_api_servers();
                 std::thread::sleep(std::time::Duration::from_millis(150));
-                let (_rx, child) = _app.shell().sidecar("api-server")?.spawn()?;
-                _app.manage(ApiSidecar(Mutex::new(Some(child))));
+
+                let mut sidecar_cmd = app.shell().sidecar("api-server")?;
+                if let Ok(resource_dir) = app.path().resource_dir() {
+                    let exiftool_name = if cfg!(windows) { "exiftool.exe" } else { "exiftool" };
+                    let exiftool_path = resource_dir.join("exiftool").join(exiftool_name);
+                    if exiftool_path.is_file() {
+                        sidecar_cmd = sidecar_cmd.env(
+                            "EXIFTOOL_PATH",
+                            exiftool_path.to_string_lossy().to_string(),
+                        );
+                    }
+                }
+
+                let (_rx, child) = sidecar_cmd.spawn().map_err(|error| {
+                    eprintln!("Failed to spawn api-server sidecar: {error}");
+                    error
+                })?;
+                app.manage(ApiSidecar(Mutex::new(Some(child))));
             }
             Ok(())
         })

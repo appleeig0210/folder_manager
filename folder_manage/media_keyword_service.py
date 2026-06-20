@@ -42,10 +42,15 @@ class MediaKeywordService:
                 return candidate
 
         bundled_name = "exiftool.exe" if sys.platform.startswith("win") else "exiftool"
-        bundled = Path(sys.executable).resolve().parent / "exiftool" / bundled_name
-        if bundled.is_file():
-            self._exiftool_path = bundled
-            return bundled
+        exe_parent = Path(sys.executable).resolve().parent
+        bundled_candidates = [
+            exe_parent / "exiftool" / bundled_name,
+            exe_parent.parent / "Resources" / "exiftool" / bundled_name,
+        ]
+        for bundled in bundled_candidates:
+            if bundled.is_file():
+                self._exiftool_path = bundled
+                return bundled
 
         found = shutil.which("exiftool")
         if found:
@@ -253,7 +258,13 @@ class MediaKeywordService:
         if not existing:
             return output
 
-        exiftool = self.resolve_exiftool()
+        try:
+            exiftool = self.resolve_exiftool()
+        except FileNotFoundError:
+            for path in existing:
+                output[str(path.resolve())] = []
+            return output
+
         args = [
             str(exiftool),
             "-json",

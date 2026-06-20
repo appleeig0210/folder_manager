@@ -1,5 +1,5 @@
 {
-  "$schema": "https://schema.tauri.app/config/2/capability",
+  "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities",
   "windows": ["main"],
@@ -7,6 +7,24 @@
     "core:default",
     "dialog:default",
     "drag:default",
-    "shell:default"
+    "shell:default",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "bin/api-server",
+          "sidecar": true
+        }
+      ]
+    },
+    {
+      "identifier": "shell:allow-kill",
+      "allow": [
+        {
+          "name": "bin/api-server",
+          "sidecar": true
+        }
+      ]
+    }
   ]
 }
