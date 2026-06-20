@@ -19,6 +19,7 @@ import { Button } from './components/ui/Button'
 import { isTauriRuntime, normalizeFolderPath } from './lib/utils'
 import { getPlatformLabel, isDesktopApp } from './lib/platform'
 import { isWebLimitedBannerDismissed, WebLimitedBanner } from './components/layout/WebLimitedBanner'
+import { foldCase } from './lib/foldCase'
 
 const DEFAULT_FILTER: FilterState = {
   selected_tags: [],
@@ -648,14 +649,14 @@ export default function App() {
     const label = uniqueTags.length === 1 ? `「${uniqueTags[0]}」` : `${uniqueTags.length} 個已選取標籤`
     if (!window.confirm(`確定要刪除${label}？此動作會從所有媒體檔移除這些標籤。`)) return
 
-    const removing = new Set(uniqueTags.map((tag) => tag.casefold()))
+    const removing = new Set(uniqueTags.map((tag) => foldCase(tag)))
     const previousAllTags = allTags
     const previousFilter = filter
     setDeletingTags(removing)
-    setAllTags((current) => current.filter((tag) => !removing.has(tag.casefold())))
+    setAllTags((current) => current.filter((tag) => !removing.has(foldCase(tag))))
     setFilter((current) => ({
       ...current,
-      selected_tags: current.selected_tags.filter((tag) => !removing.has(tag.casefold())),
+      selected_tags: current.selected_tags.filter((tag) => !removing.has(foldCase(tag))),
     }))
     setStatus('正在刪除標籤…')
 

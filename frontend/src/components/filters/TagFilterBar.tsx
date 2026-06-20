@@ -1,4 +1,5 @@
 import type { FilterState } from '../../api/types'
+import { foldCase } from '../../lib/foldCase'
 import { cn } from '../../lib/utils'
 
 interface TagFilterBarProps {
@@ -40,7 +41,7 @@ export function TagFilterBar({
           )}
           {allTags.map((tag) => {
             const active = filter.selected_tags.includes(tag)
-            const isDeleting = deleting.has(tag.casefold())
+            const isDeleting = deleting.has(foldCase(tag))
             return (
               <button
                 key={tag}
