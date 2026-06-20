@@ -125,6 +125,8 @@ export default function App() {
   const [sidebarPrunePaths, setSidebarPrunePaths] = useState<string[]>([])
   const [treeRevision, setTreeRevision] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [initializing, setInitializing] = useState(true)
+  const [deletingTags, setDeletingTags] = useState<Set<string>>(() => new Set())
   const [thumbnailVersion, setThumbnailVersion] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -157,6 +159,7 @@ export default function App() {
 
   const loadEntries = useCallback(async (paths: string[]) => {
     setLoading(true)
+    setViewMode('entries')
     try {
       const res = await api.getEntries(paths)
       setViewMode('entries')
@@ -178,6 +181,8 @@ export default function App() {
 
   const loadMedia = useCallback(async (pathOrPaths: string | string[]) => {
     setLoading(true)
+    setViewMode('media')
+    setMedia([])
     try {
       const res = await api.getMedia(pathOrPaths)
       setViewMode('media')
@@ -204,6 +209,8 @@ export default function App() {
 
   const loadTaggedMedia = useCallback(async (paths: string[]) => {
     setLoading(true)
+    setViewMode('media')
+    setMedia([])
     try {
       const res = await api.getTaggedMedia(paths)
       setViewMode('media')
@@ -235,6 +242,7 @@ export default function App() {
   }, [config.root_folder, selectedTreePaths])
 
   const init = useCallback(async () => {
+    setInitializing(true)
     try {
       await api.health()
       const cfg = await api.getConfig()
@@ -249,6 +257,8 @@ export default function App() {
       setStatus(cfg.migration_message || '就緒')
     } catch (e) {
       setStatus(`無法連線後端：${e}`)
+    } finally {
+      setInitializing(false)
     }
   }, [loadEntries, loadTags, refreshTree])
 
@@ -520,6 +530,14 @@ export default function App() {
   }
 
   const getTagContextItems = (tag: string): ContextMenuItem[] => {
+    if (deletingTags.size > 0) {
+      return [
+        {
+          label: '正在刪除中，請等候…',
+          onClick: () => setStatus('正在刪除中，請等候…'),
+        },
+      ]
+    }
     const selectedTags = filter.selected_tags
     const targetTags = selectedTags.includes(tag) && selectedTags.length > 1 ? selectedTags : [tag]
     return [
@@ -623,8 +641,23 @@ export default function App() {
   const confirmDeleteTags = async (tags: string[]) => {
     const uniqueTags = Array.from(new Set(tags)).filter(Boolean)
     if (!uniqueTags.length) return
+    if (deletingTags.size > 0) {
+      setStatus('正在刪除中，請等候…')
+      return
+    }
     const label = uniqueTags.length === 1 ? `「${uniqueTags[0]}」` : `${uniqueTags.length} 個已選取標籤`
     if (!window.confirm(`確定要刪除${label}？此動作會從所有媒體檔移除這些標籤。`)) return
+
+    const removing = new Set(uniqueTags.map((tag) => tag.casefold()))
+    const previousAllTags = allTags
+    const previousFilter = filter
+    setDeletingTags(removing)
+    setAllTags((current) => current.filter((tag) => !removing.has(tag.casefold())))
+    setFilter((current) => ({
+      ...current,
+      selected_tags: current.selected_tags.filter((tag) => !removing.has(tag.casefold())),
+    }))
+    setStatus('正在刪除標籤…')
 
     try {
       const res = await api.deleteTags(uniqueTags)
@@ -634,7 +667,11 @@ export default function App() {
       await reloadCurrentPreview()
       setStatus(`已刪除 ${uniqueTags.length} 個標籤`)
     } catch (e) {
+      setAllTags(previousAllTags)
+      setFilter(previousFilter)
       setStatus(`刪除標籤失敗：${e}`)
+    } finally {
+      setDeletingTags(new Set())
     }
   }
 
@@ -837,6 +874,7 @@ export default function App() {
           <SidebarTree
             nodes={tree}
             selectedPaths={selectedTreePaths}
+            initializing={initializing}
             prunePaths={sidebarPrunePaths}
             treeRevision={treeRevision}
             onSelect={handleTreeSelect}
@@ -877,6 +915,7 @@ export default function App() {
           allTags={allTags}
           filter={filter}
           expanded={tagsExpanded}
+          deletingTags={deletingTags}
           onToggleExpand={() => setTagsExpanded((v) => !v)}
           onToggleTag={toggleTag}
           onContextMenu={(e, tag) => {
@@ -896,6 +935,8 @@ export default function App() {
           entries={entries}
           media={media}
           selectedIds={selectedIds}
+          loading={loading}
+          initializing={initializing}
           thumbnailVersion={thumbnailVersion}
           sortable
           onSelect={handleSelect}

@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { measureMpvBounds, mpvAttach, mpvDetach, mpvSetBounds } from '../../lib/mpvPlayer'
 
+const ATTACH_RETRY_DELAYS_MS = [0, 80, 160, 320, 640, 960]
+const MAX_ATTACH_ATTEMPTS = ATTACH_RETRY_DELAYS_MS.length
+
 interface MpvVideoSurfaceProps {
   filePath: string
   active: boolean
@@ -9,20 +12,31 @@ interface MpvVideoSurfaceProps {
   layoutRevision?: number
   onReady?: () => void
   onError?: (message: string) => void
+  onRetry?: (attempt: number, maxAttempts: number) => void
 }
 
-export function MpvVideoSurface({ filePath, active, className, layoutRevision = 0, onReady, onError }: MpvVideoSurfaceProps) {
+export function MpvVideoSurface({
+  filePath,
+  active,
+  className,
+  layoutRevision = 0,
+  onReady,
+  onError,
+  onRetry,
+}: MpvVideoSurfaceProps) {
   const surfaceRef = useRef<HTMLDivElement | null>(null)
   const attachedRef = useRef(false)
   const attachingRef = useRef(false)
   const onReadyRef = useRef(onReady)
   const onErrorRef = useRef(onError)
+  const onRetryRef = useRef(onRetry)
   const syncFrameRef = useRef<number | null>(null)
 
   useEffect(() => {
     onReadyRef.current = onReady
     onErrorRef.current = onError
-  }, [onError, onReady])
+    onRetryRef.current = onRetry
+  }, [onError, onReady, onRetry])
 
   const syncBounds = useCallback(async () => {
     const element = surfaceRef.current
@@ -52,30 +66,60 @@ export function MpvVideoSurface({ filePath, active, className, layoutRevision = 
 
     let cancelled = false
 
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, ms)
+      })
+
     const attach = async () => {
       if (attachingRef.current) return
       attachingRef.current = true
+      let lastError = 'mpv attach failed'
+
       try {
-        await new Promise<void>((resolve) => {
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-        })
+        await mpvDetach().catch(() => {})
         if (cancelled) return
+        await sleep(60)
 
-        const element = surfaceRef.current
-        if (!element) return
+        for (let attempt = 0; attempt < MAX_ATTACH_ATTEMPTS; attempt += 1) {
+          if (cancelled) return
+          if (attempt > 0) {
+            onRetryRef.current?.(attempt + 1, MAX_ATTACH_ATTEMPTS)
+            await sleep(ATTACH_RETRY_DELAYS_MS[attempt])
+            if (cancelled) return
+            await mpvDetach().catch(() => {})
+            await sleep(40)
+          }
 
-        const bounds = await measureMpvBounds(element)
-        await mpvAttach(filePath, bounds)
-        if (cancelled) {
-          await mpvDetach()
-          return
+          try {
+            await new Promise<void>((resolve) => {
+              requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+            })
+            if (cancelled) return
+
+            const element = surfaceRef.current
+            if (!element) {
+              lastError = 'mpv surface element missing'
+              continue
+            }
+
+            const bounds = await measureMpvBounds(element, attempt === 0 ? 3000 : 5000)
+            await mpvAttach(filePath, bounds)
+            if (cancelled) {
+              await mpvDetach().catch(() => {})
+              return
+            }
+            attachedRef.current = true
+            onReadyRef.current?.()
+            scheduleSyncBoundsRef.current()
+            return
+          } catch (error) {
+            lastError = String(error)
+            attachedRef.current = false
+          }
         }
-        attachedRef.current = true
-        onReadyRef.current?.()
-        scheduleSyncBoundsRef.current()
-      } catch (error) {
-        attachedRef.current = false
-        onErrorRef.current?.(String(error))
+
+        onErrorRef.current?.(lastError)
       } finally {
         attachingRef.current = false
       }

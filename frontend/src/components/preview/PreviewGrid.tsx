@@ -20,6 +20,8 @@ interface PreviewGridProps {
   entries: EntryItem[]
   media: MediaItem[]
   selectedIds: Set<string>
+  loading?: boolean
+  initializing?: boolean
   thumbnailVersion?: number
   sortable?: boolean
   onSelect: (id: string, e: React.MouseEvent, index: number) => void
@@ -50,6 +52,8 @@ export function PreviewGrid({
   entries,
   media,
   selectedIds,
+  loading = false,
+  initializing = false,
   thumbnailVersion,
   onSelect,
   onDoubleClickEntry,
@@ -265,6 +269,19 @@ export function PreviewGrid({
   }
 
   if (!items.length) {
+    if (initializing || loading) {
+      const message = initializing
+        ? '載入中，請稍後…'
+        : viewMode === 'entries'
+          ? '子資料夾讀取中…'
+          : '媒體讀取中…'
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-[var(--color-text-muted)] text-sm">
+          <span className="w-5 h-5 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin" />
+          {message}
+        </div>
+      )
+    }
     return (
       <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)] text-sm">
         {viewMode === 'entries' ? '沒有可預覽的子資料夾' : '沒有可預覽的媒體'}

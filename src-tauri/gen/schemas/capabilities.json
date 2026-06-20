@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities","local":true,"windows":["main"],"permissions":["core:default","dialog:default","drag:default","shell:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities","local":true,"windows":["main"],"permissions":["core:default","dialog:default","drag:default","shell:default",{"identifier":"shell:allow-spawn","allow":[{"name":"bin/api-server","sidecar":true}]},{"identifier":"shell:allow-kill","allow":[{"name":"bin/api-server","sidecar":true}]}]}}

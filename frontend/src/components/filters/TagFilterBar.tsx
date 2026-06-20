@@ -5,12 +5,22 @@ interface TagFilterBarProps {
   allTags: string[]
   filter: FilterState
   expanded: boolean
+  deletingTags?: Set<string>
   onToggleExpand: () => void
   onToggleTag: (tag: string) => void
   onContextMenu?: (e: React.MouseEvent, tag: string) => void
 }
 
-export function TagFilterBar({ allTags, filter, expanded, onToggleExpand, onToggleTag, onContextMenu }: TagFilterBarProps) {
+export function TagFilterBar({
+  allTags,
+  filter,
+  expanded,
+  deletingTags,
+  onToggleExpand,
+  onToggleTag,
+  onContextMenu,
+}: TagFilterBarProps) {
+  const deleting = deletingTags ?? new Set<string>()
   return (
     <div className="border-b border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2">
       <div className="flex items-center justify-between gap-2 mb-2">
@@ -30,10 +40,12 @@ export function TagFilterBar({ allTags, filter, expanded, onToggleExpand, onTogg
           )}
           {allTags.map((tag) => {
             const active = filter.selected_tags.includes(tag)
+            const isDeleting = deleting.has(tag.casefold())
             return (
               <button
                 key={tag}
                 type="button"
+                disabled={isDeleting}
                 onClick={() => onToggleTag(tag)}
                 onContextMenu={(e) => {
                   e.preventDefault()
@@ -41,12 +53,13 @@ export function TagFilterBar({ allTags, filter, expanded, onToggleExpand, onTogg
                 }}
                 className={cn(
                   'px-3 py-1 rounded-[var(--radius-pill)] text-xs font-medium transition-colors border',
+                  isDeleting && 'opacity-50 cursor-wait',
                   active
                     ? 'bg-[var(--color-accent)] text-white border-[var(--color-accent)]'
                     : 'bg-[var(--color-panel-2)] text-[var(--color-text-muted)] border-[var(--color-border)] hover:border-[var(--color-accent)]',
                 )}
               >
-                {tag}
+                {isDeleting ? `${tag}…` : tag}
               </button>
             )
           })}

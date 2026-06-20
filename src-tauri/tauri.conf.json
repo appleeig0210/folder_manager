@@ -52,9 +52,7 @@
       "bin/exiftool/": "exiftool/"
     },
     "macOS": {
-      "infoPlist": {
-        "NSLocalNetworkUsageDescription": "連線本機 API 以瀏覽資料夾與媒體預覽。"
-      }
+      "infoPlist": "./Info.plist"
     }
   }
 }

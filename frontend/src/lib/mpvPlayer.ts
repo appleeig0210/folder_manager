@@ -28,8 +28,8 @@ export async function waitForMpvSurfaceLayout(element: HTMLElement, timeoutMs = 
   throw new Error('mpv surface has zero size')
 }
 
-export async function measureMpvBounds(element: HTMLElement): Promise<MpvBounds> {
-  await waitForMpvSurfaceLayout(element)
+export async function measureMpvBounds(element: HTMLElement, layoutTimeoutMs = 3000): Promise<MpvBounds> {
+  await waitForMpvSurfaceLayout(element, layoutTimeoutMs)
   const rect = element.getBoundingClientRect()
   const window = getCurrentWindow()
   const factor = await window.scaleFactor()

@@ -7,6 +7,7 @@ import { cn } from '../../lib/utils'
 interface SidebarTreeProps {
   nodes: TreeNode[]
   selectedPaths: string[]
+  initializing?: boolean
   onSelect: (paths: string[], node: TreeNode) => void
   onContextMenu?: (e: React.MouseEvent, paths: string[], node: TreeNode) => void
   onExpandLoaded?: () => void
@@ -198,6 +199,7 @@ function flattenVisibleNodes(
 export function SidebarTree({
   nodes,
   selectedPaths,
+  initializing = false,
   onSelect,
   onContextMenu,
   onExpandLoaded,
@@ -307,6 +309,12 @@ export function SidebarTree({
 
   return (
     <div className="flex flex-col gap-0.5 p-2 overflow-y-auto h-full">
+      {initializing && nodes.length === 0 ? (
+        <div className="flex flex-col items-center justify-center gap-2 py-8 text-[var(--color-text-muted)] text-sm">
+          <span className="w-4 h-4 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin" />
+          載入中，請稍後…
+        </div>
+      ) : null}
       {nodes.map((node) => (
         <TreeItem
           key={node.id}

@@ -4,6 +4,8 @@ import { isDesktopApp, WEB_LIMITATIONS } from './platform'
 export type VideoPlaybackMode =
   | 'detecting'
   | 'mpv-connecting'
+  | 'mpv-retrying'
+  | 'mpv-failed'
   | 'mpv'
   | 'asset'
   | 'http'
@@ -21,8 +23,19 @@ export function getVideoPlaybackModeInfo(input: {
   mpvMode: boolean
   mpvReady: boolean
   videoPlayback: MediaPlaybackSource | null
+  mpvRetryAttempt?: number
+  mpvRetryMax?: number
+  mpvPlaybackFailed?: boolean
 }): VideoPlaybackModeInfo {
-  const { mpvProbeDone, mpvMode, mpvReady, videoPlayback } = input
+  const {
+    mpvProbeDone,
+    mpvMode,
+    mpvReady,
+    videoPlayback,
+    mpvRetryAttempt = 0,
+    mpvRetryMax = 0,
+    mpvPlaybackFailed = false,
+  } = input
 
   if (!mpvProbeDone) {
     return {
@@ -39,6 +52,24 @@ export function getVideoPlaybackModeInfo(input: {
       label: 'mpv 內嵌',
       hint: 'B2：原生 mpv，不經 HTTP 串流',
       tone: 'success',
+    }
+  }
+
+  if (mpvMode && mpvPlaybackFailed) {
+    return {
+      mode: 'mpv-failed',
+      label: 'mpv 連線失敗',
+      hint: '可點「重試 mpv」或「以程式開啟」',
+      tone: 'warn',
+    }
+  }
+
+  if (mpvMode && mpvRetryAttempt > 0 && mpvRetryMax > 0) {
+    return {
+      mode: 'mpv-retrying',
+      label: `mpv 重試中 (${mpvRetryAttempt}/${mpvRetryMax})`,
+      hint: 'B2：切換影片時正在重新嵌入 mpv',
+      tone: 'info',
     }
   }
 

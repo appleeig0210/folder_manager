@@ -29,6 +29,7 @@ const VIDEO_SEEK_SETTLE_TIMEOUT_MS = 180
 const FINE_SEEK_WINDOW_SECONDS = 4
 const FINE_SEEK_STEP_SECONDS = 1 / 60
 const FINE_SEEK_NUDGE_SECONDS = 0.02
+const MPV_REMOUNT_LIMIT = 3
 
 interface MediaLightboxProps {
   items: MediaItem[]
@@ -54,6 +55,10 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const [mpvMode, setMpvMode] = useState(false)
   const [mpvReady, setMpvReady] = useState(false)
   const [mpvProbeDone, setMpvProbeDone] = useState(false)
+  const [mpvSurfaceKey, setMpvSurfaceKey] = useState(0)
+  const [mpvRetryAttempt, setMpvRetryAttempt] = useState(0)
+  const [mpvRetryMax, setMpvRetryMax] = useState(0)
+  const [mpvPlaybackFailed, setMpvPlaybackFailed] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const savingFrameRef = useRef(false)
@@ -77,6 +82,8 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const scrubProfileRef = useRef<VideoScrubProfile>(getVideoScrubProfile(null))
   const mpvModeRef = useRef(false)
   const mpvReadyRef = useRef(false)
+  const mpvRemountCountRef = useRef(0)
+  const htmlFallbackTriedRef = useRef(false)
   const mpvPausedRef = useRef(false)
   const lastPolledMpvTimeRef = useRef(0)
   const [mpvLayoutRevision, setMpvLayoutRevision] = useState(0)
@@ -105,16 +112,50 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     : 0
   const playbackModeInfo = useMemo(() => {
     if (item?.media_type !== 'video') return null
-    return getVideoPlaybackModeInfo({ mpvProbeDone, mpvMode, mpvReady, videoPlayback })
-  }, [item?.media_type, mpvProbeDone, mpvMode, mpvReady, videoPlayback])
+    return getVideoPlaybackModeInfo({
+      mpvProbeDone,
+      mpvMode,
+      mpvReady,
+      videoPlayback,
+      mpvRetryAttempt,
+      mpvRetryMax,
+      mpvPlaybackFailed,
+    })
+  }, [item?.media_type, mpvProbeDone, mpvMode, mpvReady, videoPlayback, mpvRetryAttempt, mpvRetryMax, mpvPlaybackFailed])
+
+  const resetMpvAttachState = useCallback(() => {
+    mpvRemountCountRef.current = 0
+    htmlFallbackTriedRef.current = false
+    setMpvPlaybackFailed(false)
+    setMpvRetryAttempt(0)
+    setMpvRetryMax(0)
+  }, [])
+
+  const retryMpvPlayback = useCallback(() => {
+    if (!item || item.media_type !== 'video' || !shouldProbeNativeMpv()) return
+    resetMpvAttachState()
+    mpvReadyRef.current = false
+    mpvModeRef.current = true
+    setMpvReady(false)
+    setMpvMode(true)
+    setVideoPlayback(null)
+    setLoaded(false)
+    setLoadError(false)
+    void mpvDetach()
+      .catch(() => {})
+      .finally(() => {
+        setMpvSurfaceKey((value) => value + 1)
+      })
+  }, [item, resetMpvAttachState])
 
   const selectIndex = useCallback((nextIndex: number) => {
     const nextItem = items[nextIndex]
     if (nextItem) activeItemIdRef.current = nextItem.id
+    resetMpvAttachState()
     setLoaded(false)
     setLoadError(false)
     setIndex(nextIndex)
-  }, [items])
+  }, [items, resetMpvAttachState])
 
   const prev = useCallback(() => {
     if (items.length <= 1) return
@@ -187,9 +228,14 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   }, [captureVideoFrame, item, onFrameSaved, onStatus, videoTime])
 
   const handleMpvReady = useCallback(() => {
+    mpvRemountCountRef.current = 0
+    htmlFallbackTriedRef.current = false
     mpvReadyRef.current = true
     setMpvReady(true)
     setLoaded(true)
+    setMpvPlaybackFailed(false)
+    setMpvRetryAttempt(0)
+    setMpvRetryMax(0)
     mpvPausedRef.current = false
     setMpvLayoutRevision((value) => value + 1)
     void mpvGetDuration()
@@ -211,15 +257,41 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     })
   }, [])
 
+  const handleMpvRetry = useCallback((attempt: number, maxAttempts: number) => {
+    setMpvRetryAttempt(attempt)
+    setMpvRetryMax(maxAttempts)
+  }, [])
+
   const handleMpvError = useCallback((message: string) => {
     if (!item) return
-    console.warn('mpv attach failed, falling back to HTML video:', message)
-    mpvModeRef.current = false
-    mpvReadyRef.current = false
-    setMpvMode(false)
-    setMpvReady(false)
-    prepareStreamableVideo(item.path)
-    void resolveMediaPlaybackSource(item.path).then(setVideoPlayback)
+    console.warn('mpv attach failed:', message)
+
+    if (mpvRemountCountRef.current < MPV_REMOUNT_LIMIT) {
+      mpvRemountCountRef.current += 1
+      mpvReadyRef.current = false
+      setMpvReady(false)
+      setLoaded(false)
+      void mpvDetach()
+        .catch(() => {})
+        .finally(() => {
+          setMpvSurfaceKey((value) => value + 1)
+        })
+      return
+    }
+
+    if (!htmlFallbackTriedRef.current && shouldProbeNativeMpv()) {
+      htmlFallbackTriedRef.current = true
+      mpvModeRef.current = false
+      mpvReadyRef.current = false
+      setMpvMode(false)
+      setMpvReady(false)
+      prepareStreamableVideo(item.path)
+      void resolveMediaPlaybackSource(item.path).then(setVideoPlayback)
+      return
+    }
+
+    setMpvPlaybackFailed(true)
+    setLoaded(true)
   }, [item])
 
   const handleClose = useCallback(() => {
@@ -688,50 +760,54 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       setMpvProbeDone(false)
       mpvModeRef.current = false
       mpvReadyRef.current = false
+      resetMpvAttachState()
       return
     }
 
     let cancelled = false
+    resetMpvAttachState()
     setMpvReady(false)
     setMpvProbeDone(false)
     setVideoPlayback(null)
     setLoaded(false)
     setLoadError(false)
+    setMpvSurfaceKey((value) => value + 1)
     mpvReadyRef.current = false
     mpvPausedRef.current = false
 
-    if (!shouldProbeNativeMpv()) {
-      setMpvProbeDone(true)
-      setMpvMode(false)
-      mpvModeRef.current = false
-      prepareStreamableVideo(item.path)
-      void resolveMediaPlaybackSource(item.path).then((source) => {
-        if (!cancelled) setVideoPlayback(source)
-      })
-      return () => {
-        cancelled = true
-        disposeVideoElement(videoRef.current)
-      }
-    }
+    const setupPlayback = async () => {
+      await mpvDetach().catch(() => {})
+      if (cancelled) return
 
-    void isNativeMpvAvailable().then((available) => {
+      if (!shouldProbeNativeMpv()) {
+        setMpvProbeDone(true)
+        setMpvMode(false)
+        mpvModeRef.current = false
+        prepareStreamableVideo(item.path)
+        const source = await resolveMediaPlaybackSource(item.path)
+        if (!cancelled) setVideoPlayback(source)
+        return
+      }
+
+      const available = await isNativeMpvAvailable()
       if (cancelled) return
       setMpvProbeDone(true)
       mpvModeRef.current = available
       setMpvMode(available)
       if (available) return
       prepareStreamableVideo(item.path)
-      void resolveMediaPlaybackSource(item.path).then((source) => {
-        if (!cancelled) setVideoPlayback(source)
-      })
-    })
+      const source = await resolveMediaPlaybackSource(item.path)
+      if (!cancelled) setVideoPlayback(source)
+    }
+
+    void setupPlayback()
 
     return () => {
       cancelled = true
       disposeVideoElement(videoRef.current)
       void mpvDetach().catch(() => {})
     }
-  }, [item?.id, item?.media_type, item?.path])
+  }, [item?.id, item?.media_type, item?.path, resetMpvAttachState])
 
   useEffect(() => {
     if (!playbackModeInfo || item?.media_type !== 'video') return
@@ -891,10 +967,14 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           </button>
 
           <div className="relative w-full h-full flex items-center justify-center">
-            {!loaded && !loadError && (
-              <div className="absolute inset-0 flex items-center justify-center text-white/50">載入中…</div>
+            {!loaded && !loadError && !(item.media_type === 'video' && mpvPlaybackFailed) && (
+              <div className="absolute inset-0 flex items-center justify-center text-white/50">
+                {item.media_type === 'video' && mpvMode && mpvRetryAttempt > 0
+                  ? `mpv 重試中 (${mpvRetryAttempt}/${mpvRetryMax})…`
+                  : '載入中…'}
+              </div>
             )}
-            {loadError ? (
+            {loadError && item.media_type !== 'video' ? (
               <div className="flex h-full w-full flex-col items-center justify-center gap-4 text-white/70">
                 <img
                   src={api.mediaThumbUrl(item.path, item.media_type)}
@@ -910,15 +990,25 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                 </div>
               </div>
             ) : item.media_type === 'video' && mpvMode ? (
-              <div className="h-full w-full min-h-0">
+              <div className="relative h-full w-full min-h-0">
                 <MpvVideoSurface
+                  key={`${item.id}:${mpvSurfaceKey}`}
                   filePath={item.path}
                   active
                   layoutRevision={mpvLayoutRevision}
                   className="h-full w-full max-h-full max-w-full rounded-[var(--radius-md)] bg-black shadow-2xl"
                   onReady={handleMpvReady}
                   onError={handleMpvError}
+                  onRetry={handleMpvRetry}
                 />
+                {mpvPlaybackFailed ? (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-[var(--radius-md)] bg-black/80 text-white/80">
+                    <p className="text-sm">mpv 無法嵌入此影片，可重試或改用系統播放器。</p>
+                    <Button size="sm" variant="secondary" onClick={retryMpvPlayback}>
+                      重試 mpv
+                    </Button>
+                  </div>
+                ) : null}
               </div>
             ) : item.media_type === 'video' && videoPlayback?.src ? (
               <motion.video
@@ -969,6 +1059,10 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                   setFineSeekCenter(current)
                 }}
                 onError={() => {
+                  if (shouldProbeNativeMpv()) {
+                    retryMpvPlayback()
+                    return
+                  }
                   setLoadError(true)
                   setLoaded(true)
                 }}
@@ -1003,7 +1097,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           </button>
         </div>
 
-        {item.media_type === 'video' && !loadError && (mpvMode || mpvReady || videoPlayback?.src) && (
+        {item.media_type === 'video' && (mpvMode || mpvReady || videoPlayback?.src) && !loadError && (
           <div className="relative z-30 shrink-0 px-6 pb-2 text-white">
             {!isDesktopApp() ? <WebVideoNotice /> : null}
             <div className="mx-auto flex max-w-4xl flex-col gap-2 rounded-[var(--radius-md)] border border-white/10 bg-white/5 px-4 py-2">
