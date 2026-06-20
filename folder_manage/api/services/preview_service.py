@@ -210,6 +210,19 @@ class PreviewService:
         display = self.apply_media_filters(raw, selected_tags, want_video, want_image, lo_min, hi_min)
         return raw, display
 
+    def scan_direct_media_for_preview(
+        self,
+        folder: Path,
+        selected_tags: set[str],
+        want_video: bool,
+        want_image: bool,
+        lo_min: Optional[float],
+        hi_min: Optional[float],
+    ) -> tuple[list[MediaItem], list[MediaItem]]:
+        raw = self.store.list_direct_media_items(folder)
+        display = self.apply_media_filters(raw, selected_tags, want_video, want_image, lo_min, hi_min)
+        return raw, display
+
     def scan_tagged_media_in_scope(
         self,
         scope_paths: list[Path],

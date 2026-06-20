@@ -31,6 +31,11 @@ class BreadcrumbItem(BaseModel):
     path: str
 
 
+class PreviewSampleItem(BaseModel):
+    path: str
+    media_type: Literal["image", "video"]
+
+
 class EntryItem(BaseModel):
     id: str
     person_name: str
@@ -40,6 +45,7 @@ class EntryItem(BaseModel):
     preview_path: Optional[str] = None
     preview_type: Optional[str] = None
     media_count: int
+    preview_samples: list[PreviewSampleItem] = Field(default_factory=list)
 
 
 class MediaItemResponse(BaseModel):
@@ -57,6 +63,15 @@ class PreviewEntriesResponse(BaseModel):
     scope_label: str
     scope_path: str
     items: list[EntryItem]
+    breadcrumb: list[BreadcrumbItem]
+
+
+class PreviewFolderResponse(BaseModel):
+    view_mode: Literal["folder"] = "folder"
+    scope_label: str
+    scope_path: str
+    entries: list[EntryItem]
+    media: list[MediaItemResponse]
     breadcrumb: list[BreadcrumbItem]
 
 

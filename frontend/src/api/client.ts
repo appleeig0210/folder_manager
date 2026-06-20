@@ -2,6 +2,7 @@ import type {
   ConfigResponse,
   FilterState,
   PreviewEntriesResponse,
+  PreviewFolderResponse,
   PreviewMediaResponse,
   StatusResponse,
   TagListResponse,
@@ -89,6 +90,14 @@ export const api = {
   getEntries: (paths: string[]) => {
     const qs = paths.map((p) => `paths=${encodeURIComponent(p)}`).join('&')
     return request<PreviewEntriesResponse>(`/api/preview/entries?${qs}`)
+  },
+  getFolder: (pathOrPaths: string | string[]) => {
+    const paths = Array.isArray(pathOrPaths) ? pathOrPaths : [pathOrPaths]
+    const qs =
+      paths.length === 1
+        ? `path=${encodeURIComponent(paths[0])}`
+        : paths.map((p) => `paths=${encodeURIComponent(p)}`).join('&')
+    return request<PreviewFolderResponse>(`/api/preview/folder?${qs}`)
   },
   getMedia: (pathOrPaths: string | string[]) => {
     const paths = Array.isArray(pathOrPaths) ? pathOrPaths : [pathOrPaths]

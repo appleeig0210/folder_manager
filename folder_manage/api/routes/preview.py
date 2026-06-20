@@ -6,14 +6,24 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from api.deps import get_ctx
-from api.schemas import EntryItem, MediaItemResponse, PreviewEntriesResponse, PreviewMediaResponse
+from api.schemas import (
+    EntryItem,
+    MediaItemResponse,
+    PreviewEntriesResponse,
+    PreviewFolderResponse,
+    PreviewMediaResponse,
+)
 from api.services.thumbnail_service import ThumbnailService
 from people_data_store import SubfolderEntry
 
 router = APIRouter(prefix="/api/preview", tags=["preview"])
 
 
-def _entry_to_item(entry: SubfolderEntry) -> EntryItem:
+def _entry_to_item(entry: SubfolderEntry, store) -> EntryItem:
+    preview_samples = [
+        {"path": str(path.resolve()), "media_type": media_type}
+        for path, media_type in store.get_folder_preview_samples(entry.subfolder_path, limit=3)
+    ]
     return EntryItem(
         id=str(entry.subfolder_path.resolve()),
         person_name=entry.person_name,
@@ -23,6 +33,7 @@ def _entry_to_item(entry: SubfolderEntry) -> EntryItem:
         preview_path=str(entry.preview_path.resolve()) if entry.preview_path else None,
         preview_type=entry.preview_type,
         media_count=entry.media_count,
+        preview_samples=preview_samples,
     )
 
 
@@ -41,6 +52,175 @@ def _media_to_item(ctx, media_path: Path, media_type: str, tags: list[str]) -> M
         duration_seconds=duration,
         duration_label=duration_label,
         tags=tags,
+    )
+
+
+def _resolve_person_name(store, folder: Path) -> str:
+    root = store.ensure_root_folder().resolve()
+    target = folder.resolve()
+    if target == root:
+        return root.name
+    try:
+        rel = target.relative_to(root)
+        if rel.parts:
+            return rel.parts[0]
+    except ValueError:
+        pass
+    return target.parent.name or target.name
+
+
+def _folder_scope_label(store, folder: Path) -> str:
+    root = store.ensure_root_folder().resolve()
+    target = folder.resolve()
+    if target == root:
+        return root.name
+    crumbs = []
+    current = root
+    try:
+        rel = target.relative_to(root)
+    except ValueError:
+        return target.name
+    for part in rel.parts:
+        current = current / part
+        crumbs.append(current.name)
+    return " / ".join(crumbs)
+
+
+def _collect_folder_entries(ctx, folder: Path) -> list[SubfolderEntry]:
+    person_name = _resolve_person_name(ctx.store, folder)
+    child_order = ctx.config.get("tree_child_order") or {}
+    ordered = ctx.tree_service.get_ordered_subfolders(folder, child_order)
+    return [ctx.preview_service.build_entry_for_folder(sub, person_name) for sub in ordered]
+
+
+def _apply_entry_manual_order(ctx, entries: list[SubfolderEntry], scope_path: str) -> list[SubfolderEntry]:
+    if ctx.preview_sort_mode != "manual":
+        return entries
+    order = ctx.manual_entry_order.get(scope_path, [])
+    if not order:
+        return entries
+    return sorted(
+        entries,
+        key=lambda e: (
+            order.index(str(e.subfolder_path.resolve()))
+            if str(e.subfolder_path.resolve()) in order
+            else 10_000,
+            e.subfolder_name.casefold(),
+        ),
+    )
+
+
+def _apply_media_manual_order(ctx, display: list, scope_path: str) -> list:
+    if ctx.preview_sort_mode != "manual":
+        return display
+    order = ctx.manual_media_order.get(scope_path, [])
+    if not order:
+        return display
+    return sorted(
+        display,
+        key=lambda m: (
+            order.index(str(m.media_path.resolve()))
+            if str(m.media_path.resolve()) in order
+            else 10_000,
+            m.media_path.name.casefold(),
+        ),
+    )
+
+
+@router.get("/folder", response_model=PreviewFolderResponse)
+def get_folder(
+    path: Optional[str] = Query(default=None),
+    paths: list[str] = Query(default=[]),
+) -> PreviewFolderResponse:
+    ctx = get_ctx()
+    if ctx.store.root_folder is None:
+        raise HTTPException(status_code=400, detail="請先設定主資料夾")
+
+    raw_paths = paths or ([path] if path else [])
+    if not raw_paths:
+        raw_paths = [str(ctx.store.root_folder.resolve())]
+
+    folders = [Path(p).resolve() for p in raw_paths if p]
+    if not folders:
+        raise HTTPException(status_code=400, detail="請提供資料夾路徑")
+    for folder in folders:
+        if not folder.is_dir():
+            raise HTTPException(status_code=400, detail=f"路徑不是資料夾：{folder}")
+
+    if len(folders) == 1:
+        folder = folders[0]
+        scope_path = str(folder)
+        scope_label = _folder_scope_label(ctx.store, folder)
+        subfolder_entries = _collect_folder_entries(ctx, folder)
+        _, media_items = ctx.preview_service.scan_direct_media_for_preview(
+            folder,
+            ctx.selected_filter_tags,
+            ctx.filter_media_video,
+            ctx.filter_media_image,
+            ctx.filter_duration_min,
+            ctx.filter_duration_max,
+        )
+    else:
+        scope_path = "||".join(str(p) for p in folders)
+        scope_label = f"已合併 {len(folders)} 個資料夾"
+        subfolder_entries = []
+        media_items = []
+        seen_entries: set[str] = set()
+        seen_media: set[str] = set()
+        for folder in folders:
+            for entry in _collect_folder_entries(ctx, folder):
+                key = str(entry.subfolder_path.resolve())
+                if key in seen_entries:
+                    continue
+                seen_entries.add(key)
+                subfolder_entries.append(entry)
+            _, folder_media = ctx.preview_service.scan_direct_media_for_preview(
+                folder,
+                ctx.selected_filter_tags,
+                ctx.filter_media_video,
+                ctx.filter_media_image,
+                ctx.filter_duration_min,
+                ctx.filter_duration_max,
+            )
+            for item in folder_media:
+                key = str(item.media_path.resolve())
+                if key in seen_media:
+                    continue
+                seen_media.add(key)
+                media_items.append(item)
+
+    subfolder_entries = ctx.preview_service.apply_media_entry_filter(
+        subfolder_entries,
+        ctx.selected_filter_tags,
+        ctx.filter_duration_min,
+        ctx.filter_duration_max,
+        ctx.filter_media_video,
+        ctx.filter_media_image,
+    )
+    subfolder_entries = ctx.preview_service.sorted_entries(subfolder_entries, ctx.preview_sort_mode)
+    subfolder_entries = _apply_entry_manual_order(ctx, subfolder_entries, scope_path)
+
+    media_items = ctx.preview_service.sorted_media(media_items, ctx.preview_sort_mode)
+    media_items = _apply_media_manual_order(ctx, media_items, scope_path)
+
+    entry_items = [_entry_to_item(e, ctx.store) for e in subfolder_entries]
+    tags_map = ctx.preview_service.get_media_tags_map(media_items)
+    media_responses = [
+        _media_to_item(
+            ctx,
+            m.media_path,
+            m.media_type,
+            tags_map.get(str(m.media_path.resolve()), []),
+        )
+        for m in media_items
+    ]
+    breadcrumb = ctx.tree_service.get_breadcrumb(str(folders[0]))
+    return PreviewFolderResponse(
+        scope_label=scope_label,
+        scope_path=scope_path,
+        entries=entry_items,
+        media=media_responses,
+        breadcrumb=[{"name": b["name"], "path": b["path"]} for b in breadcrumb],
     )
 
 
@@ -112,7 +292,7 @@ def get_entries(
                 ),
             )
 
-    items = [_entry_to_item(e) for e in entries]
+    items = [_entry_to_item(e, ctx.store) for e in entries]
     breadcrumb = ctx.tree_service.get_breadcrumb(scope_path)
     return PreviewEntriesResponse(
         scope_label=scope_label,

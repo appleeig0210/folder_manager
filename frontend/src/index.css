@@ -30,11 +30,41 @@ body {
 }
 
 .card-hover {
-  transition: transform 150ms ease, box-shadow 150ms ease, border-color 150ms ease;
+  transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease;
 }
 
 .card-hover:hover {
   transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.entry-fan-stack {
+  perspective: 600px;
+}
+
+.entry-fan-stack--expanded {
+  z-index: 30;
+}
+
+.entry-fan-anchor {
+  transition: transform 280ms cubic-bezier(0.34, 1.2, 0.64, 1);
+}
+
+.entry-fan-anchor--expanded {
+  transform: translateY(-3px);
+}
+
+.entry-fan-card {
+  transform-origin: 50% calc(100% + 14px);
+  transform: rotate(var(--fan-stack-rotate, 0deg)) translateX(var(--fan-stack-x, 0px)) translateY(var(--fan-stack-y, 0px));
+  transition:
+    transform 280ms cubic-bezier(0.34, 1.2, 0.64, 1),
+    box-shadow 280ms ease;
+  will-change: transform;
+}
+
+.entry-fan-card--expanded {
+  transform: rotate(var(--fan-spread-rotate, 0deg)) translateX(var(--fan-spread-x, 0px)) translateY(-3px);
   box-shadow: var(--shadow-md);
 }
 

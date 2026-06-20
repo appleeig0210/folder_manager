@@ -15,6 +15,23 @@ const AUTO_SCROLL_MAX_STEP = 18
 const ENTRY_HEIGHT = 324
 const MEDIA_HEIGHT = 304
 
+type GridCell =
+  | { kind: 'entry'; item: EntryItem }
+  | { kind: 'media'; item: MediaItem }
+
+function buildGridCells(viewMode: ViewMode, entries: EntryItem[], media: MediaItem[]): GridCell[] {
+  if (viewMode === 'folder') {
+    return [
+      ...entries.map((item) => ({ kind: 'entry' as const, item })),
+      ...media.map((item) => ({ kind: 'media' as const, item })),
+    ]
+  }
+  if (viewMode === 'entries') {
+    return entries.map((item) => ({ kind: 'entry' as const, item }))
+  }
+  return media.map((item) => ({ kind: 'media' as const, item }))
+}
+
 interface PreviewGridProps {
   viewMode: ViewMode
   entries: EntryItem[]
@@ -69,11 +86,11 @@ export function PreviewGrid({
   const parentRef = useRef<HTMLDivElement>(null)
   const autoScrollFrameRef = useRef<number | null>(null)
   const dragClientYRef = useRef<number | null>(null)
-  const items = viewMode === 'entries' ? entries : media
-  const rowHeight = viewMode === 'entries' ? ENTRY_HEIGHT : MEDIA_HEIGHT
+  const gridCells = useMemo(() => buildGridCells(viewMode, entries, media), [viewMode, entries, media])
+  const rowHeight = viewMode === 'media' ? MEDIA_HEIGHT : ENTRY_HEIGHT
   const isDraggingSelectedGroup = dragId !== null && selectedIds.has(dragId) && selectedIds.size > 1
   const nativeFileDragEnabled = supportsNativeFileDrag()
-  const listSignature = useMemo(() => items.map((item) => item.id).join('\0'), [items])
+  const listSignature = useMemo(() => gridCells.map((cell) => cell.item.id).join('\0'), [gridCells])
 
   useLayoutEffect(() => {
     const parent = parentRef.current
@@ -94,7 +111,7 @@ export function PreviewGrid({
     observer.observe(parent)
 
     return () => observer.disconnect()
-  }, [items.length])
+  }, [gridCells.length])
 
   const stopAutoScroll = useCallback(() => {
     if (autoScrollFrameRef.current !== null) {
@@ -148,7 +165,7 @@ export function PreviewGrid({
     return Math.max(1, Math.floor((w + CARD_GAP) / (CARD_WIDTH + CARD_GAP)))
   }, [containerWidth])
 
-  const rowCount = Math.ceil(items.length / columnCount) || 1
+  const rowCount = Math.ceil(gridCells.length / columnCount) || 1
 
   const rowVirtualizer = useVirtualizer({
     count: rowCount,
@@ -268,13 +285,13 @@ export function PreviewGrid({
     }
   }
 
-  if (!items.length) {
+  if (!gridCells.length) {
     if (initializing || loading) {
       const message = initializing
         ? '載入中，請稍後…'
-        : viewMode === 'entries'
-          ? '子資料夾讀取中…'
-          : '媒體讀取中…'
+        : viewMode === 'media'
+          ? '媒體讀取中…'
+          : '資料夾內容讀取中…'
       return (
         <div className="flex-1 flex flex-col items-center justify-center gap-3 text-[var(--color-text-muted)] text-sm">
           <span className="w-5 h-5 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin" />
@@ -284,7 +301,7 @@ export function PreviewGrid({
     }
     return (
       <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)] text-sm">
-        {viewMode === 'entries' ? '沒有可預覽的子資料夾' : '沒有可預覽的媒體'}
+        {viewMode === 'media' ? '沒有可預覽的媒體' : '此資料夾是空的'}
       </div>
     )
   }
@@ -321,8 +338,8 @@ export function PreviewGrid({
       >
         {rowVirtualizer.getVirtualItems().map((virtualRow) => {
           const startIdx = virtualRow.index * columnCount
-          const rowItems = items.slice(startIdx, startIdx + columnCount)
-          const rowSignature = rowItems.map((entry) => entry.id).join('\0')
+          const rowItems = gridCells.slice(startIdx, startIdx + columnCount)
+          const rowSignature = rowItems.map((cell) => cell.item.id).join('\0')
           return (
             <div
               key={`${listSignature}:${virtualRow.index}:${rowSignature}`}
@@ -333,10 +350,10 @@ export function PreviewGrid({
                 gridTemplateColumns: `repeat(${columnCount}, minmax(${CARD_WIDTH}px, 1fr))`,
               }}
             >
-              {rowItems.map((item, colIdx) => {
+              {rowItems.map((cell, colIdx) => {
                 const idx = startIdx + colIdx
-                if (viewMode === 'entries') {
-                  const entry = item as EntryItem
+                if (cell.kind === 'entry') {
+                  const entry = cell.item
                   return (
                     <EntryCard
                       key={entry.id}
@@ -357,20 +374,13 @@ export function PreviewGrid({
                         setDropIndicator(null)
                       }}
                       onDrop={(e) => commitDrop(e, entry.id)}
-                      onSelect={(e) => {
-                        if (e.ctrlKey || e.metaKey || e.shiftKey) {
-                          onSelect(entry.id, e, idx)
-                          return
-                        }
-                        onDoubleClickEntry(entry)
-                      }}
-                      onSelectToggle={(e) => onSelect(entry.id, e, idx)}
+                      onSelect={(e) => onSelect(entry.id, e, idx)}
                       onDoubleClick={() => onDoubleClickEntry(entry)}
                       onContextMenu={(e) => onContextMenu(e, entry.id)}
                     />
                   )
                 }
-                const mediaItem = item as MediaItem
+                const mediaItem = cell.item
                 return (
                   <MediaCard
                     key={mediaItem.id}
@@ -394,7 +404,7 @@ export function PreviewGrid({
                     }}
                     onDrop={(e) => commitDrop(e, mediaItem.id)}
                     onSelect={(e) => onSelect(mediaItem.id, e, idx)}
-                    onDoubleClick={() => onDoubleClickMedia(mediaItem, idx)}
+                    onDoubleClick={() => onDoubleClickMedia(mediaItem, media.findIndex((m) => m.id === mediaItem.id))}
                     onContextMenu={(e) => onContextMenu(e, mediaItem.id)}
                   />
                 )

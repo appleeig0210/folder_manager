@@ -3,7 +3,7 @@ import { Button } from '../ui/Button'
 
 interface MediaFilterBarProps {
   filter: FilterState
-  viewMode: 'entries' | 'media'
+  viewMode: 'folder' | 'entries' | 'media'
   onChange: (patch: Partial<FilterState>) => void
   onApplyDuration: () => void
 }
@@ -36,7 +36,7 @@ export function MediaFilterBar({ filter, viewMode, onChange, onApplyDuration }: 
         />
         <span>圖片</span>
       </label>
-      {viewMode === 'media' && (
+      {(viewMode === 'media' || viewMode === 'folder') && (
         <>
           <span className="text-[var(--color-text-muted)]">影片長度（分）</span>
           <input

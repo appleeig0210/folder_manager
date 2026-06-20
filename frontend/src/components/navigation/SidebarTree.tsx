@@ -1,5 +1,5 @@
-import { ChevronDown, ChevronRight, Folder, FolderOpen, User } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronDown, ChevronRight, Folder, FolderOpen } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TreeNode } from '../../api/types'
 import { api } from '../../api/client'
 import { cn } from '../../lib/utils'
@@ -7,6 +7,7 @@ import { cn } from '../../lib/utils'
 interface SidebarTreeProps {
   nodes: TreeNode[]
   selectedPaths: string[]
+  focusPath?: string
   initializing?: boolean
   onSelect: (paths: string[], node: TreeNode) => void
   onContextMenu?: (e: React.MouseEvent, paths: string[], node: TreeNode) => void
@@ -39,13 +40,14 @@ function TreeItem({
   const open = openPaths.has(node.path)
   const children = childrenByPath[node.path] ?? node.children
   const [loading, setLoading] = useState(false)
-  const hasChildren = node.type !== 'stub' && (children.length > 0 || node.type !== 'subfolder' || children.some((c) => c.type === 'stub'))
+  const realChildren = children.filter((child) => child.type !== 'stub')
+  const hasExpandableChildren = realChildren.length > 0 || children.some((child) => child.type === 'stub')
   const isSelected = selectedPaths.includes(node.path)
   const isStub = node.type === 'stub'
 
   if (isStub) return null
 
-  const Icon = node.type === 'person' ? User : node.type === 'root' ? FolderOpen : Folder
+  const Icon = node.type === 'root' ? FolderOpen : Folder
 
   const toggle = async () => {
     if (!open && children.some((c) => c.type === 'stub')) {
@@ -70,6 +72,7 @@ function TreeItem({
     <div>
       <button
         type="button"
+        data-tree-path={normalizeTreePath(node.path)}
         onClick={handleClick}
         onContextMenu={(e) => onContextMenu?.(node, e)}
         className={cn(
@@ -84,10 +87,10 @@ function TreeItem({
           className="w-4 h-4 flex items-center justify-center shrink-0 text-[var(--color-text-muted)]"
           onClick={(e) => {
             e.stopPropagation()
-            if (hasChildren || node.type !== 'subfolder') toggle()
+            if (hasExpandableChildren) toggle()
           }}
         >
-          {hasChildren || node.type !== 'subfolder' ? (
+          {hasExpandableChildren ? (
             loading ? (
               <span className="w-3 h-3 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin" />
             ) : open ? (
@@ -190,6 +193,24 @@ function syncChildrenByPath(
   return next
 }
 
+function scrollTreePathIntoView(container: HTMLElement, path: string) {
+  const normalized = normalizeTreePath(path)
+  const escaped =
+    typeof CSS !== 'undefined' && 'escape' in CSS
+      ? CSS.escape(normalized)
+      : normalized.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  container.querySelector<HTMLElement>(`[data-tree-path="${escaped}"]`)?.scrollIntoView({ block: 'nearest' })
+}
+
+function scheduleScrollTreePath(container: HTMLElement | null, path: string) {
+  if (!container) return
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      scrollTreePathIntoView(container, path)
+    })
+  })
+}
+
 function flattenVisibleNodes(
   nodes: TreeNode[],
   openPaths: Set<string>,
@@ -210,6 +231,7 @@ function flattenVisibleNodes(
 export function SidebarTree({
   nodes,
   selectedPaths,
+  focusPath,
   initializing = false,
   onSelect,
   onContextMenu,
@@ -217,10 +239,71 @@ export function SidebarTree({
   prunePaths,
   treeRevision = 0,
 }: SidebarTreeProps) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const childrenByPathRef = useRef<Record<string, TreeNode[]>>({})
+  const lastRevealedPathRef = useRef<string | null>(null)
   const [anchorPath, setAnchorPath] = useState<string | null>(null)
   const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set(nodes.filter((node) => node.type === 'root').map((node) => node.path)))
   const [childrenByPath, setChildrenByPath] = useState<Record<string, TreeNode[]>>(() => buildInitialChildrenByPath(nodes))
   const lastRefreshRevisionRef = useRef(0)
+
+  useEffect(() => {
+    childrenByPathRef.current = childrenByPath
+  }, [childrenByPath])
+
+  const revealFocusPath = useCallback(async (targetPath: string) => {
+    const normalizedTarget = normalizeTreePath(targetPath)
+    if (!normalizedTarget) return
+
+    const crumbs = await api.getBreadcrumb(targetPath)
+    const ancestorPaths = crumbs.slice(0, -1).map((crumb) => crumb.path)
+    let nextChildren = childrenByPathRef.current
+
+    for (const path of ancestorPaths) {
+      setOpenPaths((current) => {
+        const next = new Set(current)
+        next.add(path)
+        return next
+      })
+
+      const children = nextChildren[path]
+      if (!children || isStubOnly(children)) {
+        try {
+          const loaded = await api.expandNode(path)
+          nextChildren = { ...nextChildren, [path]: loaded }
+          setChildrenByPath((current) => applyPrunePaths({ ...current, [path]: loaded }, prunePaths))
+        } catch {
+          // Ignore paths that cannot be expanded.
+        }
+      }
+    }
+
+    childrenByPathRef.current = nextChildren
+    lastRevealedPathRef.current = normalizedTarget
+    scheduleScrollTreePath(containerRef.current, targetPath)
+  }, [prunePaths])
+
+  useEffect(() => {
+    if (!focusPath || nodes.length === 0) return
+    const normalized = normalizeTreePath(focusPath)
+    if (lastRevealedPathRef.current === normalized) {
+      scheduleScrollTreePath(containerRef.current, focusPath)
+      return
+    }
+
+    let cancelled = false
+    void revealFocusPath(focusPath).catch(() => {
+      if (!cancelled) lastRevealedPathRef.current = null
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [focusPath, nodes.length, revealFocusPath])
+
+  useEffect(() => {
+    if (!focusPath) lastRevealedPathRef.current = null
+  }, [focusPath])
 
   useEffect(() => {
     const removed = new Set((prunePaths ?? []).map(normalizeTreePath))
@@ -319,7 +402,7 @@ export function SidebarTree({
   }
 
   return (
-    <div className="flex flex-col gap-0.5 p-2 overflow-y-auto h-full">
+    <div ref={containerRef} className="flex flex-col gap-0.5 p-2 overflow-y-auto h-full">
       {initializing && nodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-2 py-8 text-[var(--color-text-muted)] text-sm">
           <span className="w-4 h-4 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin" />

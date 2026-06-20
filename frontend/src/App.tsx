@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api/client'
 import type {
   EntryItem,
@@ -94,12 +94,18 @@ function reorderRenamedItems<T extends { id: string }>(
   return result
 }
 
+function getGridItems(viewMode: ViewMode, entries: EntryItem[], media: MediaItem[]): Array<EntryItem | MediaItem> {
+  if (viewMode === 'folder') return [...entries, ...media]
+  if (viewMode === 'entries') return entries
+  return media
+}
+
 export default function App() {
   const [config, setConfig] = useState({ root_folder: '', has_root: false })
   const [tree, setTree] = useState<TreeNode[]>([])
   const [selectedTreePaths, setSelectedTreePaths] = useState<string[]>([])
   const [selectedTreeTypes, setSelectedTreeTypes] = useState<Record<string, TreeNode['type']>>({})
-  const [viewMode, setViewMode] = useState<ViewMode>('entries')
+  const [viewMode, setViewMode] = useState<ViewMode>('folder')
   const [entries, setEntries] = useState<EntryItem[]>([])
   const [media, setMedia] = useState<MediaItem[]>([])
   const [scopeLabel, setScopeLabel] = useState('未選擇')
@@ -156,6 +162,36 @@ export default function App() {
     const res = await api.getTags()
     setAllTags(res.all_tags)
     setFilter(res.filter_state)
+  }, [])
+
+  const loadFolder = useCallback(async (
+    pathOrPaths: string | string[],
+    options?: { clearPreview?: boolean },
+  ) => {
+    setLoading(true)
+    setViewMode('folder')
+    if (options?.clearPreview) {
+      setEntries([])
+      setMedia([])
+      setSelectedIds(new Set())
+    }
+    try {
+      const res = await api.getFolder(pathOrPaths)
+      setViewMode('folder')
+      setEntries(res.entries)
+      setMedia(res.media)
+      setScopeLabel(res.scope_label)
+      setScopePath(res.scope_path)
+      setBreadcrumb(res.breadcrumb)
+      setSelectedIds(new Set())
+      setStatus(`已載入 ${res.entries.length} 個資料夾、${res.media.length} 個媒體`)
+      return res
+    } catch (e) {
+      setStatus(String(e))
+      return null
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   const loadEntries = useCallback(async (paths: string[]) => {
@@ -251,7 +287,7 @@ export default function App() {
       await loadTags()
       await refreshTree()
       if (cfg.has_root && cfg.root_folder) {
-        await loadEntries([cfg.root_folder])
+        await loadFolder(cfg.root_folder)
         setSelectedTreePaths([cfg.root_folder])
         setSelectedTreeTypes({ [cfg.root_folder]: 'root' })
       }
@@ -261,7 +297,7 @@ export default function App() {
     } finally {
       setInitializing(false)
     }
-  }, [loadEntries, loadTags, refreshTree])
+  }, [loadFolder, loadTags, refreshTree])
 
   useEffect(() => {
     init()
@@ -305,13 +341,6 @@ export default function App() {
     return fallback ?? 'subfolder'
   }, [getPathDepthFromRoot])
 
-  const isMergedSubfolderSelection = useCallback(() => {
-    return (
-      selectedTreePaths.length > 1 &&
-      selectedTreePaths.every((path) => classifyTreePath(path, selectedTreeTypes[path]) === 'subfolder')
-    )
-  }, [classifyTreePath, selectedTreePaths, selectedTreeTypes])
-
   const reloadPreviewForSelection = useCallback(
     async (activeFilter: FilterState, treePaths: string[]) => {
       if (activeFilter.selected_tags.length > 0) {
@@ -320,17 +349,9 @@ export default function App() {
         return
       }
       if (!treePaths.length) return
-      if (treePaths.length > 1) {
-        const allSubfolders = treePaths.every((path) => classifyTreePath(path, selectedTreeTypes[path]) === 'subfolder')
-        if (allSubfolders) await loadMedia(treePaths)
-        else await loadEntries(treePaths)
-        return
-      }
-      const nodeType = classifyTreePath(treePaths[0], selectedTreeTypes[treePaths[0]])
-      if (nodeType === 'subfolder') await loadMedia(treePaths[0])
-      else await loadEntries(treePaths)
+      await loadFolder(treePaths)
     },
-    [classifyTreePath, config.root_folder, loadEntries, loadMedia, loadTaggedMedia, selectedTreeTypes],
+    [config.root_folder, loadFolder, loadTaggedMedia],
   )
 
   const updateFilter = async (patch: Partial<FilterState>) => {
@@ -346,34 +367,21 @@ export default function App() {
     await reloadPreviewForSelection(res.filter_state, selectedTreePaths)
   }
 
-  const getMediaReloadTarget = useCallback((): string | string[] | null => {
-    if (isMergedSubfolderSelection()) return selectedTreePaths
-    if (scopePath.includes('||')) return scopePath.split('||').filter(Boolean)
-    return scopePath || selectedTreePaths[0] || null
-  }, [isMergedSubfolderSelection, scopePath, selectedTreePaths])
-
   const reloadCurrentPreview = useCallback(async () => {
     if (filter.selected_tags.length > 0) {
       const scope = getTagFilterScopePaths()
       if (scope.length) await loadTaggedMedia(scope)
       return
     }
-    if (viewMode === 'media') {
-      const target = getMediaReloadTarget()
-      if (target) await loadMedia(target)
-      return
-    }
-    if (selectedTreePaths.length) await loadEntries(selectedTreePaths)
-  }, [
-    filter.selected_tags,
-    getMediaReloadTarget,
-    getTagFilterScopePaths,
-    loadEntries,
-    loadMedia,
-    loadTaggedMedia,
-    selectedTreePaths,
-    viewMode,
-  ])
+    const paths = selectedTreePaths.length
+      ? selectedTreePaths
+      : scopePath.includes('||')
+        ? scopePath.split('||').filter(Boolean)
+        : scopePath
+          ? [scopePath]
+          : []
+    if (paths.length) await loadFolder(paths)
+  }, [filter.selected_tags, getTagFilterScopePaths, loadFolder, loadTaggedMedia, scopePath, selectedTreePaths])
 
   const handleTreeSelect = async (paths: string[], node: TreeNode) => {
     setSelectedTreePaths(paths)
@@ -389,21 +397,9 @@ export default function App() {
       return
     }
 
-    if (paths.length > 1) {
-      const allSubfolders = paths.every((path) => classifyTreePath(path, nextTypes[path]) === 'subfolder')
-      if (allSubfolders) {
-        await loadMedia(paths)
-      } else {
-        await loadEntries(paths)
-      }
-      return
-    }
-
-    if (classifyTreePath(node.path, node.type) === 'subfolder') {
-      await loadMedia(node.path)
-    } else {
-      await loadEntries(paths)
-    }
+    await loadFolder(paths.length ? paths : config.root_folder ? [config.root_folder] : [], {
+      clearPreview: true,
+    })
   }
 
   const handleNavigate = async (path: string) => {
@@ -414,29 +410,11 @@ export default function App() {
       await loadTaggedMedia([path])
       return
     }
-    const cfg = await api.getConfig()
-    const depth = getPathDepthFromRoot(path)
-    if (path === cfg.root_folder || depth === 0) {
-      await loadEntries([path])
-    } else if (depth >= 2) {
-      await loadMedia(path)
-    } else {
-      const crumbs = await api.getBreadcrumb(path)
-      const parent = crumbs.length > 1 ? crumbs[crumbs.length - 2] : null
-      if (parent && parent.path === cfg.root_folder && crumbs.length === 2) {
-        await loadEntries([path])
-      } else {
-        try {
-          await loadMedia(path)
-        } catch {
-          await loadEntries([path])
-        }
-      }
-    }
+    await loadFolder(path, { clearPreview: true })
   }
 
   const handleSelect = (id: string, e: React.MouseEvent, index: number) => {
-    const items = viewMode === 'entries' ? entries : media
+    const items = getGridItems(viewMode, entries, media)
     if (e.shiftKey && anchorIndex !== null) {
       const [lo, hi] = [anchorIndex, index].sort((a, b) => a - b)
       const range = items.slice(lo, hi + 1).map((it) => it.id)
@@ -469,20 +447,9 @@ export default function App() {
   }
 
   const handleDoubleClickEntry = async (item: EntryItem) => {
-    const hasMedia = item.media_count > 0
-    if (hasMedia) {
-      setSelectedTreePaths([item.path])
-      setSelectedTreeTypes({ [item.path]: 'subfolder' })
-      await loadMedia(item.path)
-      return
-    }
-
-    const subfolders = await api.expandNode(item.path)
-    if (subfolders.filter((c) => c.type !== 'stub').length > 0) {
-      setSelectedTreePaths([item.path])
-      setSelectedTreeTypes({ [item.path]: 'subfolder' })
-      await loadEntries([item.path])
-    }
+    setSelectedTreePaths([item.path])
+    setSelectedTreeTypes({ [item.path]: classifyTreePath(item.path, 'subfolder') })
+    await loadFolder(item.path, { clearPreview: true })
   }
 
   const getContextItems = (targetId: string): ContextMenuItem[] => {
@@ -561,11 +528,7 @@ export default function App() {
     setSidebarPrunePaths(deletedSources)
     await refreshTree()
     setTreeRevision((version) => version + 1)
-    if (targetType === 'subfolder') {
-      await loadMedia(targetPath)
-    } else {
-      await loadEntries([targetPath])
-    }
+    await loadFolder(targetPath)
   }
 
   const runFolderMerge = async (paths: string[], strategy: FolderMergeStrategy) => {
@@ -615,7 +578,7 @@ export default function App() {
     const res = await api.createFolder(parent, name)
     setStatus(res.message)
     await refreshTree()
-    await loadEntries(selectedTreePaths.length ? selectedTreePaths : [parent])
+    await loadFolder(selectedTreePaths.length ? selectedTreePaths : [parent])
   }
 
   const promptEditTags = async (paths: string[], currentTags: string[]) => {
@@ -686,7 +649,7 @@ export default function App() {
     setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
     await refreshTree()
-    await loadEntries(selectedTreePaths)
+    await loadFolder(selectedTreePaths)
   }
 
   const promptRenameFile = async (path: string) => {
@@ -712,17 +675,18 @@ export default function App() {
       return
     }
 
-    const orderBeforeRename = (viewMode === 'entries' ? entries : media).map((item) => item.id)
-    const res = await api.renameNumbered(paths, base, startNo, viewMode === 'entries')
+    const renamingFolders = paths.every((path) => entries.some((entry) => entry.path === path))
+    const orderBeforeRename = renamingFolders ? entries.map((item) => item.id) : media.map((item) => item.id)
+    const res = await api.renameNumbered(paths, base, startNo, renamingFolders)
     setThumbnailVersion((version) => version + 1)
     if (filter.sort_mode === 'manual') {
       const renamedIds = res.renamed_paths?.length
         ? res.renamed_paths
-        : buildFallbackRenamedIds(paths, base, startNo, viewMode === 'entries')
+        : buildFallbackRenamedIds(paths, base, startNo, renamingFolders)
       const renameMap = new Map(paths.map((oldId, index) => [oldId, renamedIds[index] ?? oldId]))
       if (viewMode === 'media') {
-        const target = getMediaReloadTarget()
-        const preview = target ? await loadMedia(target) : null
+        const scope = getTagFilterScopePaths()
+        const preview = scope.length ? await loadTaggedMedia(scope) : null
         if (preview) {
           const reordered = reorderRenamedItems(preview.items, orderBeforeRename, renameMap, (item) => item.name)
           setMedia(reordered)
@@ -731,16 +695,22 @@ export default function App() {
           return
         }
       } else if (selectedTreePaths.length) {
-        const preview = await loadEntries(selectedTreePaths)
+        const preview = await loadFolder(selectedTreePaths)
         if (preview) {
-          const reordered = reorderRenamedItems(
-            preview.items,
-            orderBeforeRename,
-            renameMap,
-            (item) => item.subfolder_name,
-          )
-          setEntries(reordered)
-          await api.reorder(preview.scope_path, 'entries', reordered.map((item) => item.id))
+          if (renamingFolders) {
+            const reordered = reorderRenamedItems(
+              preview.entries,
+              orderBeforeRename,
+              renameMap,
+              (item) => item.subfolder_name,
+            )
+            setEntries(reordered)
+            await api.reorder(preview.scope_path, 'entries', reordered.map((item) => item.id))
+          } else {
+            const reordered = reorderRenamedItems(preview.media, orderBeforeRename, renameMap, (item) => item.name)
+            setMedia(reordered)
+            await api.reorder(preview.scope_path, 'media', reordered.map((item) => item.id))
+          }
           setStatus(`${res.message}，已依序號更新手動排序`)
           return
         }
@@ -781,7 +751,7 @@ export default function App() {
     setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
     await refreshTree()
-    if (config.root_folder) await loadEntries([config.root_folder])
+    if (config.root_folder) await loadFolder(config.root_folder)
   }
 
   const confirmDeleteFiles = async (paths: string[]) => {
@@ -832,7 +802,7 @@ export default function App() {
       await refreshTree()
       setSelectedTreePaths([rootPath])
       setSelectedTreeTypes({ [rootPath]: 'root' })
-      await loadEntries([rootPath])
+      await loadFolder(rootPath)
     } catch (e) {
       setStatus(`設定主資料夾失敗：${e}`)
     }
@@ -863,8 +833,11 @@ export default function App() {
     setStatus(`已匯出 ${format.toUpperCase()} 標籤`)
   }
 
-  const visibleItems = viewMode === 'entries' ? entries : media
+  const visibleItems = getGridItems(viewMode, entries, media)
   const selectedPaths = visibleItems.filter((item) => selectedIds.has(item.id)).map((item) => item.path)
+  const entryPathSet = useMemo(() => new Set(entries.map((entry) => normalizeId(entry.path))), [entries])
+  const selectedHasMedia = selectedPaths.some((path) => !entryPathSet.has(normalizeId(path)))
+  const treeFocusPath = selectedTreePaths.length === 1 ? selectedTreePaths[0] : undefined
 
   return (
     <div className="h-full flex flex-col min-h-0">
@@ -878,6 +851,7 @@ export default function App() {
           <SidebarTree
             nodes={tree}
             selectedPaths={selectedTreePaths}
+            focusPath={treeFocusPath}
             initializing={initializing}
             prunePaths={sidebarPrunePaths}
             treeRevision={treeRevision}
@@ -952,7 +926,12 @@ export default function App() {
             setContextMenu({ x: e.clientX, y: e.clientY, targetId: id })
           }}
           onReorder={async (fromId, toId, position) => {
-            const items = viewMode === 'entries' ? entries : media
+            const entryIds = new Set(entries.map((entry) => entry.id))
+            const fromIsEntry = entryIds.has(fromId)
+            const toIsEntry = entryIds.has(toId)
+            if (fromIsEntry !== toIsEntry) return
+            const items = fromIsEntry ? entries : media
+            const reorderKind = fromIsEntry ? 'entries' : 'media'
             const ids = items.map((it) => it.id)
             const fromIdx = ids.indexOf(fromId)
             const toIdx = ids.indexOf(toId)
@@ -968,7 +947,7 @@ export default function App() {
             const next = [...withoutMoving]
             next.splice(position === 'after' ? targetIdx + 1 : targetIdx, 0, ...movingIds)
             const orderIndex = new Map(next.map((id, index) => [id, index]))
-            if (viewMode === 'entries') {
+            if (fromIsEntry) {
               setEntries((current) =>
                 [...current].sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0)),
               )
@@ -979,7 +958,7 @@ export default function App() {
             }
             setFilter((current) => ({ ...current, sort_mode: 'manual' }))
             try {
-              await api.reorder(scopePath, viewMode === 'entries' ? 'entries' : 'media', next)
+              await api.reorder(scopePath, reorderKind, next)
             } catch (e) {
               setStatus(`已更新畫面排序，但暫存排序失敗：${e}`)
               return
@@ -991,16 +970,17 @@ export default function App() {
 
       <SelectionToolbar
         count={selectedIds.size}
-        showAddTags={viewMode === 'media'}
+        showAddTags={viewMode === 'media' || selectedHasMedia}
         onTransfer={() => promptTransfer(selectedPaths)}
         onRenameNumbered={() => promptRenameNumbered(selectedPaths)}
         onAddTags={() => promptAddTags(selectedPaths)}
         onDelete={() => {
-          if (viewMode === 'entries') {
-            selectedPaths.forEach((p) => confirmDeleteFolder(p))
-          } else {
-            confirmDeleteFiles(selectedPaths)
-          }
+          const filePaths = selectedPaths.filter((path) => media.some((item) => item.path === path))
+          const folderPaths = selectedPaths.filter((path) => entries.some((item) => item.path === path))
+          if (filePaths.length) void confirmDeleteFiles(filePaths)
+          folderPaths.forEach((path) => {
+            void confirmDeleteFolder(path)
+          })
         }}
       />
 

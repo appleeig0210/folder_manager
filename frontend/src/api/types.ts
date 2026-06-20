@@ -1,5 +1,5 @@
 export type TreeNodeType = 'root' | 'person' | 'subfolder' | 'stub'
-export type ViewMode = 'entries' | 'media'
+export type ViewMode = 'folder' | 'entries' | 'media'
 export type SortMode = 'name' | 'time' | 'type' | 'manual'
 
 export interface TreeNode {
@@ -15,6 +15,11 @@ export interface BreadcrumbItem {
   path: string
 }
 
+export interface PreviewSampleItem {
+  path: string
+  media_type: 'image' | 'video'
+}
+
 export interface EntryItem {
   id: string
   person_name: string
@@ -24,6 +29,7 @@ export interface EntryItem {
   preview_path?: string | null
   preview_type?: string | null
   media_count: number
+  preview_samples?: PreviewSampleItem[]
 }
 
 export interface MediaItem {
@@ -43,6 +49,15 @@ export interface FilterState {
   duration_min?: number | null
   duration_max?: number | null
   sort_mode: SortMode
+}
+
+export interface PreviewFolderResponse {
+  view_mode: 'folder'
+  scope_label: string
+  scope_path: string
+  entries: EntryItem[]
+  media: MediaItem[]
+  breadcrumb: BreadcrumbItem[]
 }
 
 export interface PreviewEntriesResponse {

@@ -105,6 +105,15 @@ class PeopleDataStore:
         cache = self._get_or_scan_folder(Path(folder))
         return cache.preview_path, cache.preview_type, cache.media_count
 
+    def get_folder_preview_samples(self, folder: Path, limit: int = 3) -> list[tuple[Path, str]]:
+        cache = self._get_or_scan_folder(Path(folder))
+        samples: list[tuple[Path, str]] = []
+        for item in cache.media_items:
+            if len(samples) >= limit:
+                break
+            samples.append((item.media_path, item.media_type))
+        return samples
+
     def get_subfolder_entries_shallow(self, person_folder: Path) -> list[SubfolderEntry]:
         """Only list direct child folders and preview metadata."""
         person = Path(person_folder)
@@ -130,6 +139,25 @@ class PeopleDataStore:
             return []
         cache = self._get_or_scan_folder(target)
         return list(cache.media_items)
+
+    def list_direct_media_items(self, folder: Path) -> list[MediaItem]:
+        target = Path(folder).resolve()
+        if not target.exists() or not target.is_dir():
+            return []
+        items: list[MediaItem] = []
+        try:
+            children = sorted(target.iterdir(), key=lambda p: p.name.lower())
+        except Exception:
+            return []
+        for path in children:
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if suffix in IMAGE_EXTENSIONS:
+                items.append(MediaItem(media_path=path, media_type="image"))
+            elif suffix in VIDEO_EXTENSIONS:
+                items.append(MediaItem(media_path=path, media_type="video"))
+        return items
 
     def get_folder_media_type_flags(self, folder: Path) -> tuple[bool, bool]:
         """遞迴掃描資料夾底下是否含圖片／影片（使用快取）。"""
