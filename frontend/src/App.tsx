@@ -891,7 +891,6 @@ export default function App() {
               }
               setSidebarContextMenu({ x: e.clientX, y: e.clientY, paths })
             }}
-            onExpandLoaded={refreshTree}
           />
         }
         breadcrumb={breadcrumb}

@@ -161,6 +161,14 @@ function applyPrunePaths(
   return next
 }
 
+function isStubOnly(children: TreeNode[]): boolean {
+  return children.length === 0 || children.every((child) => child.type === 'stub')
+}
+
+function hasRealChildren(children: TreeNode[]): boolean {
+  return children.some((child) => child.type !== 'stub')
+}
+
 function syncChildrenByPath(
   current: Record<string, TreeNode[]>,
   nodes: TreeNode[],
@@ -168,10 +176,13 @@ function syncChildrenByPath(
   const fromApi = buildInitialChildrenByPath(nodes)
   const next: Record<string, TreeNode[]> = { ...fromApi }
 
-  // Keep lazy-expanded subtrees only for paths not present in the fresh API snapshot.
+  // Shallow tree snapshots only carry stub placeholders. Keep lazy-expanded
+  // children so deep folders do not vanish after refreshTree().
   for (const [path, cached] of Object.entries(current)) {
-    if (path in fromApi) continue
-    if (cached.some((child) => child.type !== 'stub')) {
+    if (!hasRealChildren(cached)) continue
+
+    const apiChildren = fromApi[path]
+    if (apiChildren === undefined || isStubOnly(apiChildren)) {
       next[path] = cached
     }
   }
