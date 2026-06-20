@@ -268,8 +268,10 @@ export default function App() {
   }, [init])
 
   const toggleTag = (tag: string) => {
-    const selected = filter.selected_tags.includes(tag)
-      ? filter.selected_tags.filter((t) => t !== tag)
+    const key = foldCase(tag)
+    const alreadySelected = filter.selected_tags.some((selected) => foldCase(selected) === key)
+    const selected = alreadySelected
+      ? filter.selected_tags.filter((t) => foldCase(t) !== key)
       : [...filter.selected_tags, tag]
     updateFilter({ selected_tags: selected })
   }
@@ -540,7 +542,8 @@ export default function App() {
       ]
     }
     const selectedTags = filter.selected_tags
-    const targetTags = selectedTags.includes(tag) && selectedTags.length > 1 ? selectedTags : [tag]
+    const tagSelected = selectedTags.some((selected) => foldCase(selected) === foldCase(tag))
+    const targetTags = tagSelected && selectedTags.length > 1 ? selectedTags : [tag]
     return [
       {
         label: targetTags.length > 1 ? `刪除已選取標籤（${targetTags.length}）` : '刪除標籤',

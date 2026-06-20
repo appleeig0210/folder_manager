@@ -10,6 +10,7 @@ from fastapi.responses import PlainTextResponse
 
 from api.deps import get_ctx
 from api.schemas import DeleteTagsRequest, FilterState, ImportTagsRequest, SetTagsRequest, StatusResponse, TagListResponse
+from media_keyword_service import MediaKeywordService
 
 router = APIRouter(prefix="/api/tags", tags=["tags"])
 
@@ -40,7 +41,7 @@ def list_tags() -> TagListResponse:
 @router.patch("/filter", response_model=TagListResponse)
 def update_filter(state: FilterState) -> TagListResponse:
     ctx = get_ctx()
-    ctx.selected_filter_tags = set(state.selected_tags)
+    ctx.selected_filter_tags = set(MediaKeywordService.dedupe_tags_preserve_order(state.selected_tags))
     ctx.filter_media_video = state.media_video
     ctx.filter_media_image = state.media_image
     ctx.filter_duration_min = state.duration_min

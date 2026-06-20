@@ -97,6 +97,37 @@ class MediaKeywordService:
             return True
         return False
 
+    @staticmethod
+    def tag_key(tag: str) -> str:
+        return (tag or "").strip().casefold()
+
+    @classmethod
+    def dedupe_tags_preserve_order(cls, tags: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for tag in tags:
+            clean = (tag or "").strip()
+            if not clean or cls._is_corrupted_tag(clean):
+                continue
+            token = clean.casefold()
+            if token in seen:
+                continue
+            seen.add(token)
+            result.append(clean)
+        return result
+
+    @classmethod
+    def tags_match_any_selected(cls, file_tags: list[str], selected_tags: set[str]) -> bool:
+        if not selected_tags:
+            return True
+        selected_keys = {cls.tag_key(tag) for tag in selected_tags}
+        selected_keys.discard("")
+        if not selected_keys:
+            return True
+        file_keys = {cls.tag_key(tag) for tag in file_tags}
+        file_keys.discard("")
+        return bool(file_keys.intersection(selected_keys))
+
     def _normalize_tags(self, tags: list[str]) -> list[str]:
         result: list[str] = []
         seen: set[str] = set()
@@ -381,10 +412,14 @@ class MediaKeywordService:
         if not media_paths:
             return []
         keywords_map = self.read_keywords_batch(media_paths)
-        merged: set[str] = set()
+        merged: dict[str, str] = {}
         for tags in keywords_map.values():
-            merged.update(tags)
-        return sorted(merged, key=str.casefold)
+            for tag in tags:
+                key = self.tag_key(tag)
+                if not key or key in merged:
+                    continue
+                merged[key] = tag.strip()
+        return sorted(merged.values(), key=str.casefold)
 
     def remove_tag_everywhere(self, store: PeopleDataStore, tag: str) -> int:
         token = (tag or "").strip().casefold()

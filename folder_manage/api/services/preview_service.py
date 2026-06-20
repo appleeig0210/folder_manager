@@ -77,13 +77,13 @@ class PreviewService:
     def media_matches_tag_filter(self, path: Path, selected_tags: set[str]) -> bool:
         if not selected_tags:
             return True
-        file_tags = set(self.keyword_service.get_keywords(path))
-        return bool(file_tags.intersection(selected_tags))
+        file_tags = self.keyword_service.get_keywords(path)
+        return self.keyword_service.tags_match_any_selected(file_tags, selected_tags)
 
     def folder_contains_tagged_media(self, folder: Path, selected_tags: set[str]) -> bool:
         if not selected_tags:
             return True
-        signature = "|".join(sorted(selected_tags, key=str.casefold))
+        signature = "|".join(sorted((self.keyword_service.tag_key(t) for t in selected_tags), key=str))
         cache_key = (str(folder.resolve()), signature)
         cached = self._folder_tag_filter_cache.get(cache_key)
         if cached is not None:
@@ -97,8 +97,8 @@ class PreviewService:
         keywords_map = self.keyword_service.read_keywords_batch([item.media_path for item in items])
         matched = False
         for item in items:
-            tags = set(keywords_map.get(str(item.media_path.resolve()), []))
-            if tags.intersection(selected_tags):
+            tags = keywords_map.get(str(item.media_path.resolve()), [])
+            if self.keyword_service.tags_match_any_selected(tags, selected_tags):
                 matched = True
                 break
         self._folder_tag_filter_cache[cache_key] = matched
@@ -110,8 +110,8 @@ class PreviewService:
         keywords_map = self.keyword_service.read_keywords_batch([item.media_path for item in items])
         result: list[MediaItem] = []
         for item in items:
-            tags = set(keywords_map.get(str(item.media_path.resolve()), []))
-            if tags.intersection(selected_tags):
+            tags = keywords_map.get(str(item.media_path.resolve()), [])
+            if self.keyword_service.tags_match_any_selected(tags, selected_tags):
                 result.append(item)
         return result
 

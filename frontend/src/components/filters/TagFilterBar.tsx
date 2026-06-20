@@ -40,7 +40,7 @@ export function TagFilterBar({
             <span className="text-xs text-[var(--color-text-muted)]">尚無標籤</span>
           )}
           {allTags.map((tag) => {
-            const active = filter.selected_tags.includes(tag)
+            const active = filter.selected_tags.some((selected) => foldCase(selected) === foldCase(tag))
             const isDeleting = deleting.has(foldCase(tag))
             return (
               <button
