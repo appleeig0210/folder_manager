@@ -91,7 +91,7 @@ def add_tags(body: SetTagsRequest) -> StatusResponse:
     message = f"已為 {updated} 個媒體檔添加標籤：{', '.join(tags)}"
     if warnings:
         message += f"（{len(warnings)} 個失敗）"
-    return StatusResponse(message=message)
+    return StatusResponse(message=message, warnings=warnings or None, ok=updated > 0 or not warnings)
 
 
 @router.post("/delete", response_model=TagListResponse)

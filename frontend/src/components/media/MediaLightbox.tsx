@@ -1,12 +1,13 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { ChevronLeft, ChevronRight, ExternalLink, X } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { ChevronLeft, ChevronRight, ExternalLink, Tag, X } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react'
 import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
 import { prepareStreamableVideo, resolveMediaPlaybackSource, type MediaPlaybackSource } from '../../lib/mediaPlayback'
 import { isNativeMpvAvailable, mpvDetach, mpvGetDuration, mpvGetTime, mpvSeek, mpvSetMuted, mpvSetPaused, mpvSetVolume } from '../../lib/mpvPlayer'
 import { getMpvScrubProfile, getVideoScrubProfile, isDesktopApp, shouldProbeNativeMpv, shouldUseServerFrameExtract, type VideoScrubProfile } from '../../lib/platform'
 import { getVideoPlaybackModeInfo, playbackModeBadgeClass } from '../../lib/playbackDiagnostics'
+import { isAppModalInteraction, isAppModalOpen } from '../../lib/modal'
 import { WebVideoNotice } from './WebVideoNotice'
 import { MpvVideoSurface } from './MpvVideoSurface'
 import { disposeVideoElement } from './videoUtils'
@@ -37,9 +38,10 @@ interface MediaLightboxProps {
   onClose: () => void
   onStatus?: (message: string) => void
   onFrameSaved?: (message: string) => void | Promise<void>
+  onContextMenu?: (e: React.MouseEvent, item: MediaItem) => void
 }
 
-export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameSaved }: MediaLightboxProps) {
+export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameSaved, onContextMenu }: MediaLightboxProps) {
   const [index, setIndex] = useState(initialIndex)
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState(false)
@@ -87,6 +89,9 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const mpvPausedRef = useRef(false)
   const lastPolledMpvTimeRef = useRef(0)
   const [mpvLayoutRevision, setMpvLayoutRevision] = useState(0)
+  const [mpvSuspendedByModal, setMpvSuspendedByModal] = useState(false)
+  const [layoutReady, setLayoutReady] = useState(false)
+  const layoutAttachTokenRef = useRef('')
   const activeItemIdRef = useRef(items[initialIndex]?.id)
   const activeIndex = activeItemIdRef.current
     ? items.findIndex((candidate) => candidate.id === activeItemIdRef.current)
@@ -110,6 +115,11 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const fineSeekProgress = fineSeekEnd > fineSeekStart
     ? ((fineSeekValue - fineSeekStart) / (fineSeekEnd - fineSeekStart)) * 100
     : 0
+  const controlDuration = videoDuration > 0 ? videoDuration : (item?.duration_seconds ?? 0)
+  const coarseProgress = controlDuration > 0
+    ? Math.min(100, (coarseSeekValue / controlDuration) * 100)
+    : coarseSeekProgress
+  const showVideoControls = item?.media_type === 'video' && !loadError
   const playbackModeInfo = useMemo(() => {
     if (item?.media_type !== 'video') return null
     return getVideoPlaybackModeInfo({
@@ -154,6 +164,8 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     resetMpvAttachState()
     setLoaded(false)
     setLoadError(false)
+    setLayoutReady(false)
+    layoutAttachTokenRef.current = ''
     setIndex(nextIndex)
   }, [items, resetMpvAttachState])
 
@@ -166,6 +178,13 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     if (items.length <= 1) return
     selectIndex((resolvedIndex + 1) % items.length)
   }, [items.length, resolvedIndex, selectIndex])
+
+  useLayoutEffect(() => {
+    activeItemIdRef.current = items[initialIndex]?.id
+    setIndex(initialIndex)
+    setLayoutReady(false)
+    layoutAttachTokenRef.current = ''
+  }, [initialIndex, items])
 
   useLayoutEffect(() => {
     if (activeIndex >= 0) {
@@ -690,8 +709,11 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     holdSeekTimerRef.current = null
   }, [])
 
-  const releaseVideoControlFocus = useCallback(() => {
+  const releaseVideoControlFocus = useCallback((event?: Event | SyntheticEvent) => {
+    const nativeEvent = event && 'nativeEvent' in event ? event.nativeEvent : event
+    if (isAppModalInteraction(nativeEvent)) return
     const release = () => {
+      if (isAppModalOpen()) return
       videoRef.current?.blur()
       rootRef.current?.focus({ preventScroll: true })
     }
@@ -751,6 +773,34 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     if (item?.media_type !== 'video') return
     applyVideoVolume(videoVolume, videoMuted)
   }, [applyVideoVolume, item?.id, mpvReady, videoMuted, videoPlayback?.src, videoVolume])
+
+  useEffect(() => {
+    const onOpen = () => {
+      setMpvSuspendedByModal(true)
+      void mpvDetach().catch(() => {})
+    }
+    const onClose = () => {
+      setMpvSuspendedByModal(false)
+      setMpvSurfaceKey((value) => value + 1)
+    }
+    window.addEventListener('app-modal-open', onOpen)
+    window.addEventListener('app-modal-close', onClose)
+    return () => {
+      window.removeEventListener('app-modal-open', onOpen)
+      window.removeEventListener('app-modal-close', onClose)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (item?.media_type !== 'video') {
+      setLayoutReady(true)
+      return
+    }
+    const fallbackId = window.setTimeout(() => {
+      setLayoutReady(true)
+    }, 320)
+    return () => window.clearTimeout(fallbackId)
+  }, [item?.id, item?.media_type])
 
   useEffect(() => {
     if (item?.media_type !== 'video') {
@@ -836,6 +886,36 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   }, [mpvMode, mpvReady, scrubbing])
 
   useEffect(() => {
+    if (!layoutReady || mpvSuspendedByModal || !mpvMode || mpvReady || item?.media_type !== 'video') return
+    const token = `${item.id}:layout`
+    if (layoutAttachTokenRef.current === token) return
+    layoutAttachTokenRef.current = token
+    setMpvSurfaceKey((value) => value + 1)
+  }, [item?.id, item?.media_type, layoutReady, mpvMode, mpvReady, mpvSuspendedByModal])
+
+  useEffect(() => {
+    if (!mpvMode || !mpvReady || videoDuration > 0) return
+    let cancelled = false
+    const syncDuration = () => {
+      void mpvGetDuration()
+        .then((duration) => {
+          if (!cancelled && Number.isFinite(duration) && duration > 0) {
+            setVideoDuration(duration)
+          }
+        })
+        .catch(() => {})
+    }
+    syncDuration()
+    const retryId = window.setTimeout(syncDuration, 250)
+    const retryId2 = window.setTimeout(syncDuration, 900)
+    return () => {
+      cancelled = true
+      window.clearTimeout(retryId)
+      window.clearTimeout(retryId2)
+    }
+  }, [item?.id, mpvMode, mpvReady, videoDuration])
+
+  useEffect(() => {
     const onRelease = () => {
       if (!scrubbingRef.current) return
       const next = scrubDraftRef.current ?? readVideoTime()
@@ -871,7 +951,10 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           return
         }
       }
-      if (e.key === 'Escape') handleClose()
+      if (e.key === 'Escape') {
+        if (isAppModalOpen()) return
+        handleClose()
+      }
       if (e.key === 'ArrowLeft') prev()
       if (e.key === 'ArrowRight') next()
       if (e.key === 'Enter') item && api.openPath(item.path)
@@ -911,6 +994,13 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
 
   if (!item) return null
 
+  const handlePreviewContextMenu = (e: React.MouseEvent) => {
+    if (!onContextMenu) return
+    e.preventDefault()
+    e.stopPropagation()
+    onContextMenu(e, item)
+  }
+
   return (
     <AnimatePresence>
       <motion.div
@@ -919,9 +1009,13 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
+        onAnimationComplete={() => setLayoutReady(true)}
         className="fixed inset-0 z-50 flex flex-col bg-black/92 outline-none"
       >
-        <div className="relative z-30 flex items-center justify-between px-4 py-3 text-white">
+        <div
+          className="relative z-30 flex items-center justify-between px-4 py-3 text-white"
+          onContextMenu={handlePreviewContextMenu}
+        >
           <div className="min-w-0">
             <p className="text-sm font-semibold truncate">{item.name}</p>
             <p className="text-xs text-white/60">
@@ -938,6 +1032,16 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {onContextMenu ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-white hover:bg-white/10"
+                onClick={handlePreviewContextMenu}
+              >
+                <Tag className="w-4 h-4" /> 標籤
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="ghost"
@@ -966,7 +1070,10 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
             <ChevronLeft className="w-10 h-10" />
           </button>
 
-          <div className="relative w-full h-full flex items-center justify-center">
+          <div
+            className="relative w-full h-full flex items-center justify-center"
+            onContextMenu={handlePreviewContextMenu}
+          >
             {!loaded && !loadError && !(item.media_type === 'video' && mpvPlaybackFailed) && (
               <div className="absolute inset-0 flex items-center justify-center text-white/50">
                 {item.media_type === 'video' && mpvMode && mpvRetryAttempt > 0
@@ -981,6 +1088,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                   alt={item.name}
                   draggable={false}
                   onDragStart={(e) => e.preventDefault()}
+                  onContextMenu={handlePreviewContextMenu}
                   className="max-h-[72vh] max-w-full rounded-[var(--radius-md)] object-contain shadow-2xl"
                   onLoad={() => setLoaded(true)}
                 />
@@ -990,11 +1098,11 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                 </div>
               </div>
             ) : item.media_type === 'video' && mpvMode ? (
-              <div className="relative h-full w-full min-h-0">
+              <div className="relative h-full w-full min-h-0" onContextMenu={handlePreviewContextMenu}>
                 <MpvVideoSurface
                   key={`${item.id}:${mpvSurfaceKey}`}
                   filePath={item.path}
-                  active
+                  active={layoutReady && !mpvSuspendedByModal}
                   layoutRevision={mpvLayoutRevision}
                   className="h-full w-full max-h-full max-w-full rounded-[var(--radius-md)] bg-black shadow-2xl"
                   onReady={handleMpvReady}
@@ -1024,6 +1132,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                 controls={playbackProfile.showNativeControls}
                 autoPlay
                 tabIndex={-1}
+                onContextMenu={handlePreviewContextMenu}
                 onFocus={releaseVideoControlFocus}
                 onPointerUp={releaseVideoControlFocus}
                 onMouseUp={releaseVideoControlFocus}
@@ -1077,6 +1186,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                 alt={item.name}
                 draggable={false}
                 onDragStart={(e) => e.preventDefault()}
+                onContextMenu={handlePreviewContextMenu}
                 className="max-w-full max-h-full object-contain rounded-[var(--radius-md)] shadow-2xl"
                 onLoad={() => setLoaded(true)}
                 onError={() => {
@@ -1097,15 +1207,15 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           </button>
         </div>
 
-        {item.media_type === 'video' && (mpvMode || mpvReady || videoPlayback?.src) && !loadError && (
-          <div className="relative z-30 shrink-0 px-6 pb-2 text-white">
+        {showVideoControls && (
+          <div className="relative z-30 shrink-0 px-6 pb-2 text-white" onContextMenu={handlePreviewContextMenu}>
             {!isDesktopApp() ? <WebVideoNotice /> : null}
             <div className="mx-auto flex max-w-4xl flex-col gap-2 rounded-[var(--radius-md)] border border-white/10 bg-white/5 px-4 py-2">
               <div className="flex items-center justify-between gap-3 text-xs text-white/65">
                 <span>目前 {formatTimestampFine(displayedTime)}</span>
-                <span>{videoDuration > 0 ? `總長 ${formatTimestamp(videoDuration)}` : '讀取時間中…'}</span>
+                <span>{controlDuration > 0 ? `總長 ${formatTimestamp(controlDuration)}` : '讀取時間中…'}</span>
               </div>
-              {videoDuration > 0 && (
+              {controlDuration > 0 && (
                 <div className="flex items-center gap-3">
                   <span className="w-[7.5rem] shrink-0 text-[11px] leading-snug text-white/45">
                     全片時間軸
@@ -1114,20 +1224,20 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                     <div className="video-scrub-range-track" aria-hidden>
                       <div
                         className="video-scrub-range-fill video-scrub-range-fill--coarse"
-                        style={{ width: `${coarseSeekProgress}%` }}
+                        style={{ width: `${coarseProgress}%` }}
                       />
                     </div>
                     <div
                       className="video-scrub-range-thumb"
-                      style={{ '--scrub-progress': coarseSeekProgress / 100 } as CSSProperties}
+                      style={{ '--scrub-progress': coarseProgress / 100 } as CSSProperties}
                       aria-hidden
                     />
                     <input
                       type="range"
                       min={0}
-                      max={videoDuration}
+                      max={Math.max(videoDuration, controlDuration)}
                       step="any"
-                      value={coarseSeekValue}
+                      value={Math.min(coarseSeekValue, Math.max(videoDuration, controlDuration) || coarseSeekValue)}
                       onPointerDown={(event) => {
                         event.currentTarget.setPointerCapture(event.pointerId)
                         activeScrubInputRef.current = event.currentTarget
@@ -1249,7 +1359,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           </div>
         )}
 
-        <div className="px-4 py-3 border-t border-white/10 overflow-x-auto">
+        <div className="px-4 py-3 border-t border-white/10 overflow-x-auto" onContextMenu={handlePreviewContextMenu}>
           <div className="flex gap-2 justify-center min-w-min">
             {items.map((m, i) => (
               <button
@@ -1276,7 +1386,8 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
 
         <p className="text-center text-xs text-white/40 pb-3">
           ← → 切換 · Enter 以外部程式開啟
-          {item.media_type === 'video' ? ' · 空白鍵播放/暫停 · A/D 快退快進 · Ctrl/Cmd+S 儲存目前影片畫面' : ''} · Esc 關閉
+          {item.media_type === 'video' ? ' · 空白鍵播放/暫停 · A/D 快退快進 · Ctrl/Cmd+S 儲存目前影片畫面' : ''}
+          {item.media_type === 'video' && mpvMode ? ' · mpv 播放區請用上方「標籤」或時間軸右鍵' : ''} · Esc 關閉
         </p>
       </motion.div>
     </AnimatePresence>

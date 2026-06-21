@@ -34,7 +34,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   return (
     <div
       ref={ref}
-      className="fixed z-50 min-w-[200px] py-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel)] shadow-[var(--shadow-md)]"
+      className="fixed z-[60] min-w-[200px] py-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel)] shadow-[var(--shadow-md)]"
       style={{ left: x, top: y }}
     >
       {items.map((item, i) =>

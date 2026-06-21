@@ -172,6 +172,55 @@ class MediaKeywordService:
         with self._cache_lock:
             self._cache[key] = (mtime_ns, normalized)
 
+    def _exiftool_charset_args(self) -> list[str]:
+        args = ["-charset", "utf8"]
+        if sys.platform.startswith("win"):
+            args.extend(["-charset", "filename=utf8"])
+        return args
+
+    def _write_path_argfile(self, paths: list[Path]) -> Path:
+        fd, name = tempfile.mkstemp(prefix="media_paths_", suffix=".txt")
+        os.close(fd)
+        argfile = Path(name)
+        lines = "\n".join(str(path.resolve()) for path in paths)
+        argfile.write_text(f"{lines}\n", encoding="utf-8")
+        return argfile
+
+    def _run_exiftool_for_paths(
+        self,
+        base_args: list[str],
+        paths: list[Path],
+        *,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        if not paths:
+            return subprocess.CompletedProcess(base_args, 1, "", "No paths")
+        argfile = self._write_path_argfile(paths)
+        try:
+            args = [*base_args, "-@", str(argfile)]
+            return self._run_exiftool(args, timeout=timeout)
+        finally:
+            argfile.unlink(missing_ok=True)
+
+    def _index_exiftool_items(self, payload: list, paths: list[Path]) -> dict[str, dict]:
+        by_source: dict[str, dict] = {}
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            source = item.get("SourceFile")
+            if not isinstance(source, str) or not source.strip():
+                continue
+            by_source[str(Path(source).resolve())] = item
+
+        indexed: dict[str, dict] = {}
+        for index, path in enumerate(paths):
+            key = str(path.resolve())
+            item = by_source.get(key)
+            if item is None and index < len(payload) and isinstance(payload[index], dict):
+                item = payload[index]
+            indexed[key] = item or {}
+        return indexed
+
     def _run_exiftool(self, args: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             args,
@@ -243,18 +292,16 @@ class MediaKeywordService:
 
     def _write_keywords_with_exiftool(self, exiftool: Path, file_path: Path, tags: list[str]) -> subprocess.CompletedProcess[str]:
         payload = self._build_write_payload(file_path, tags)
-        tmp_json = Path(tempfile.gettempdir()) / f"media_tags_{os.getpid()}_{file_path.stem}.json"
+        tmp_json = Path(tempfile.gettempdir()) / f"media_tags_{os.getpid()}.json"
         try:
             tmp_json.write_text(json.dumps([payload], ensure_ascii=False), encoding="utf-8")
             args = [
                 str(exiftool),
                 "-overwrite_original",
-                "-charset",
-                "utf8",
+                *self._exiftool_charset_args(),
                 f"-j={tmp_json}",
-                str(file_path),
             ]
-            return self._run_exiftool(args, timeout=120)
+            return self._run_exiftool_for_paths(args, [file_path], timeout=120)
         finally:
             tmp_json.unlink(missing_ok=True)
 
@@ -299,18 +346,16 @@ class MediaKeywordService:
         args = [
             str(exiftool),
             "-json",
-            "-charset",
-            "utf8",
+            *self._exiftool_charset_args(),
             "-s",
             "-s",
             "-s",
         ]
         for field in self.READ_FIELDS:
             args.append(f"-{field}")
-        args.extend(str(p) for p in existing)
 
         try:
-            proc = self._run_exiftool(args, timeout=max(30, len(existing) * 2))
+            proc = self._run_exiftool_for_paths(args, existing, timeout=max(30, len(existing) * 2))
         except (OSError, subprocess.TimeoutExpired):
             for path in existing:
                 output[str(path.resolve())] = []
@@ -329,11 +374,10 @@ class MediaKeywordService:
         if not isinstance(payload, list):
             payload = []
 
-        for index, path in enumerate(existing):
+        indexed = self._index_exiftool_items(payload, existing)
+        for path in existing:
             key = str(path.resolve())
-            item: dict = {}
-            if index < len(payload) and isinstance(payload[index], dict):
-                item = payload[index]
+            item = indexed.get(key, {})
             tags = self._extract_tags_from_item(item)
             self._cache_set(path, tags)
             output[key] = tags

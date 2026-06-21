@@ -21,6 +21,7 @@ import { isTauriRuntime, normalizeFolderPath } from './lib/utils'
 import { getPlatformLabel, isDesktopApp } from './lib/platform'
 import { isWebLimitedBannerDismissed, WebLimitedBanner } from './components/layout/WebLimitedBanner'
 import { foldCase } from './lib/foldCase'
+import { parseTagInput } from './lib/parseTagInput'
 
 const DEFAULT_FILTER: FilterState = {
   selected_tags: [],
@@ -542,11 +543,15 @@ export default function App() {
       defaultValue: currentTags.join(', '),
     })
     if (raw === null) return
-    const tags = raw.split(',').map((t) => t.trim()).filter(Boolean)
-    const res = await api.setTags(uniquePaths, tags)
-    setStatus(res.message)
-    await loadTags()
-    await reloadCurrentPreview()
+    const tags = parseTagInput(raw)
+    try {
+      const res = await api.setTags(uniquePaths, tags)
+      setStatus(res.message)
+      await loadTags()
+      await reloadCurrentPreview()
+    } catch (e) {
+      setStatus(`編輯標籤失敗：${e}`)
+    }
   }
 
   const promptAddTags = async (paths: string[]) => {
@@ -557,12 +562,24 @@ export default function App() {
       description: '輸入標籤（以逗號分隔）',
       placeholder: '例如：精選, 2024',
     })
-    if (!raw) return
-    const tags = raw.split(',').map((t) => t.trim()).filter(Boolean)
-    const res = await api.addTags(uniquePaths, tags)
-    setStatus(res.message)
-    await loadTags()
-    await reloadCurrentPreview()
+    if (raw === null) return
+    const tags = parseTagInput(raw)
+    if (!tags.length) {
+      setStatus('請輸入至少一個標籤')
+      return
+    }
+    try {
+      const res = await api.addTags(uniquePaths, tags)
+      if (res.ok === false) {
+        setStatus(res.warnings?.length ? `${res.message}：${res.warnings.join('；')}` : res.message)
+        return
+      }
+      setStatus(res.warnings?.length ? `${res.message}：${res.warnings.join('；')}` : res.message)
+      await loadTags()
+      await reloadCurrentPreview()
+    } catch (e) {
+      setStatus(`添加標籤失敗：${e}`)
+    }
   }
 
   const confirmDeleteTags = async (tags: string[]) => {
@@ -954,13 +971,21 @@ export default function App() {
         <MediaLightbox
           items={media}
           initialIndex={lightboxIndex}
-          onClose={() => setLightboxIndex(null)}
+          onClose={() => {
+            setLightboxIndex(null)
+            setContextMenu(null)
+          }}
           onStatus={setStatus}
           onFrameSaved={async (message) => {
             setThumbnailVersion((version) => version + 1)
             await refreshTree()
             await reloadCurrentPreview()
             setStatus(message)
+          }}
+          onContextMenu={(e, item) => {
+            setSidebarContextMenu(null)
+            setTagContextMenu(null)
+            setContextMenu({ x: e.clientX, y: e.clientY, targetId: item.id })
           }}
         />
       )}

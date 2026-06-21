@@ -157,6 +157,7 @@ class ReorderRequest(BaseModel):
 class StatusResponse(BaseModel):
     message: str
     ok: bool = True
+    warnings: Optional[list[str]] = None
     renamed_paths: Optional[list[str]] = None
     saved_path: Optional[str] = None
     conflicts: Optional[list[dict[str, str]]] = None

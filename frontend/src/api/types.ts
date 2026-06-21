@@ -90,6 +90,7 @@ export interface TagListResponse {
 export interface StatusResponse {
   message: string
   ok: boolean
+  warnings?: string[] | null
   renamed_paths?: string[] | null
   saved_path?: string | null
   conflicts?: { source_path: string; target_path: string; name: string }[] | null
