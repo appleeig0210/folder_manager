@@ -196,56 +196,6 @@ export default function App() {
     }
   }, [])
 
-  const loadEntries = useCallback(async (paths: string[]) => {
-    setLoading(true)
-    setViewMode('entries')
-    try {
-      const res = await api.getEntries(paths)
-      setViewMode('entries')
-      setEntries(res.items)
-      setMedia([])
-      setScopeLabel(res.scope_label)
-      setScopePath(res.scope_path)
-      setBreadcrumb(res.breadcrumb)
-      setSelectedIds(new Set())
-      setStatus(`已載入 ${res.items.length} 個子資料夾`)
-      return res
-    } catch (e) {
-      setStatus(String(e))
-      return null
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  const loadMedia = useCallback(async (pathOrPaths: string | string[]) => {
-    setLoading(true)
-    setViewMode('media')
-    setMedia([])
-    try {
-      const res = await api.getMedia(pathOrPaths)
-      setViewMode('media')
-      setMedia(res.items)
-      setEntries([])
-      setScopeLabel(res.scope_label)
-      setScopePath(res.scope_path)
-      setBreadcrumb(res.breadcrumb)
-      setSelectedIds(new Set())
-      setStatus(`已載入 ${res.items.length} 個媒體`)
-      return res
-    } catch (e) {
-      setViewMode('media')
-      setEntries([])
-      setMedia([])
-      setScopeLabel('媒體預覽載入失敗')
-      setBreadcrumb([])
-      setStatus(String(e))
-      return null
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
   const loadTaggedMedia = useCallback(async (paths: string[]) => {
     setLoading(true)
     setViewMode('media')
