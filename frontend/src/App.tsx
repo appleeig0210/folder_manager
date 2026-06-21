@@ -16,6 +16,7 @@ import { SelectionToolbar } from './components/preview/SelectionToolbar'
 import { MediaLightbox } from './components/media/MediaLightbox'
 import { ContextMenu, type ContextMenuItem } from './components/ui/ContextMenu'
 import { Button } from './components/ui/Button'
+import { useTextPrompt } from './components/ui/TextPromptProvider'
 import { isTauriRuntime, normalizeFolderPath } from './lib/utils'
 import { getPlatformLabel, isDesktopApp } from './lib/platform'
 import { isWebLimitedBannerDismissed, WebLimitedBanner } from './components/layout/WebLimitedBanner'
@@ -101,6 +102,7 @@ function getGridItems(viewMode: ViewMode, entries: EntryItem[], media: MediaItem
 }
 
 export default function App() {
+  const { promptText, confirmAction } = useTextPrompt()
   const [config, setConfig] = useState({ root_folder: '', has_root: false })
   const [tree, setTree] = useState<TreeNode[]>([])
   const [selectedTreePaths, setSelectedTreePaths] = useState<string[]>([])
@@ -573,7 +575,7 @@ export default function App() {
   }
 
   const promptCreateFolder = async (parent: string) => {
-    const name = window.prompt('新資料夾名稱：')
+    const name = await promptText({ title: '新資料夾名稱：' })
     if (!name) return
     const res = await api.createFolder(parent, name)
     setStatus(res.message)
@@ -584,7 +586,11 @@ export default function App() {
   const promptEditTags = async (paths: string[], currentTags: string[]) => {
     const uniquePaths = Array.from(new Set(paths)).filter(Boolean)
     if (!uniquePaths.length) return
-    const raw = window.prompt('編輯標籤（以逗號分隔，留空可清除全部）：', currentTags.join(', '))
+    const raw = await promptText({
+      title: '編輯標籤',
+      description: '以逗號分隔，留空可清除全部',
+      defaultValue: currentTags.join(', '),
+    })
     if (raw === null) return
     const tags = raw.split(',').map((t) => t.trim()).filter(Boolean)
     const res = await api.setTags(uniquePaths, tags)
@@ -596,7 +602,11 @@ export default function App() {
   const promptAddTags = async (paths: string[]) => {
     const uniquePaths = Array.from(new Set(paths)).filter(Boolean)
     if (!uniquePaths.length) return
-    const raw = window.prompt('輸入標籤（以逗號分隔）：')
+    const raw = await promptText({
+      title: '添加標籤',
+      description: '輸入標籤（以逗號分隔）',
+      placeholder: '例如：精選, 2024',
+    })
     if (!raw) return
     const tags = raw.split(',').map((t) => t.trim()).filter(Boolean)
     const res = await api.addTags(uniquePaths, tags)
@@ -613,7 +623,7 @@ export default function App() {
       return
     }
     const label = uniqueTags.length === 1 ? `「${uniqueTags[0]}」` : `${uniqueTags.length} 個已選取標籤`
-    if (!window.confirm(`確定要刪除${label}？此動作會從所有媒體檔移除這些標籤。`)) return
+    if (!(await confirmAction(`確定要刪除${label}？此動作會從所有媒體檔移除這些標籤。`))) return
 
     const removing = new Set(uniqueTags.map((tag) => foldCase(tag)))
     const previousAllTags = allTags
@@ -643,7 +653,7 @@ export default function App() {
   }
 
   const promptRenameFolder = async (path: string, current: string) => {
-    const name = window.prompt('新資料夾名稱：', current)
+    const name = await promptText({ title: '新資料夾名稱：', defaultValue: current })
     if (!name || name === current) return
     const res = await api.renameFolder(path, name)
     setThumbnailVersion((version) => version + 1)
@@ -655,7 +665,7 @@ export default function App() {
   const promptRenameFile = async (path: string) => {
     const base = path.split(/[/\\]/).pop() ?? ''
     const stem = base.replace(/\.[^.]+$/, '')
-    const name = window.prompt('新主檔名：', stem)
+    const name = await promptText({ title: '新主檔名：', defaultValue: stem })
     if (!name) return
     const res = await api.renameFile(path, name)
     setThumbnailVersion((version) => version + 1)
@@ -665,9 +675,9 @@ export default function App() {
 
   const promptRenameNumbered = async (paths: string[]) => {
     if (!paths.length) return
-    const base = window.prompt('命名規則（例如 ABC）：')
+    const base = await promptText({ title: '命名規則（例如 ABC）：' })
     if (!base) return
-    const startRaw = window.prompt('起始序號：', '1')
+    const startRaw = await promptText({ title: '起始序號：', defaultValue: '1' })
     if (!startRaw) return
     const startNo = parseInt(startRaw, 10)
     if (!Number.isFinite(startNo)) {
@@ -733,7 +743,10 @@ export default function App() {
       if (!selected || Array.isArray(selected)) return
       target = selected
     } else {
-      target = window.prompt('目標資料夾完整路徑：', selectedTreePaths[0] || config.root_folder) ?? ''
+      target = (await promptText({
+        title: '目標資料夾完整路徑：',
+        defaultValue: selectedTreePaths[0] || config.root_folder,
+      })) ?? ''
     }
     target = normalizeFolderPath(target)
     if (!target) return
@@ -746,7 +759,7 @@ export default function App() {
   }
 
   const confirmDeleteFolder = async (path: string) => {
-    if (!window.confirm('確定刪除此資料夾及其所有內容？')) return
+    if (!(await confirmAction('確定刪除此資料夾及其所有內容？'))) return
     const res = await api.deleteFolder(path)
     setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
@@ -755,7 +768,7 @@ export default function App() {
   }
 
   const confirmDeleteFiles = async (paths: string[]) => {
-    if (!window.confirm(`確定刪除 ${paths.length} 個檔案？`)) return
+    if (!(await confirmAction(`確定刪除 ${paths.length} 個檔案？`))) return
     const deletedPaths = new Set(paths.map(normalizeId))
     setMedia((current) => {
       const next = current.filter((item) => !deletedPaths.has(normalizeId(item.path)))
@@ -787,7 +800,10 @@ export default function App() {
         if (!selected || Array.isArray(selected)) return
         path = selected
       } else {
-        path = window.prompt('主資料夾完整路徑：', config.root_folder) ?? ''
+        path = (await promptText({
+          title: '主資料夾完整路徑：',
+          defaultValue: config.root_folder,
+        })) ?? ''
       }
       path = normalizeFolderPath(path)
       if (!path) return
@@ -823,7 +839,7 @@ export default function App() {
   }
 
   const handleExportTags = async () => {
-    const format = window.confirm('確定匯出 JSON？（取消則匯出 CSV）') ? 'json' : 'csv'
+    const format = (await confirmAction('確定匯出 JSON？（取消則匯出 CSV）')) ? 'json' : 'csv'
     const content = await api.exportTags(format)
     const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/csv' })
     const a = document.createElement('a')
