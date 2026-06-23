@@ -11,7 +11,7 @@ import { AppShell } from './components/layout/AppShell'
 import { TagFilterBar } from './components/filters/TagFilterBar'
 import { MediaFilterBar } from './components/filters/MediaFilterBar'
 import { SidebarTree } from './components/navigation/SidebarTree'
-import { PreviewGrid } from './components/preview/PreviewGrid'
+import { PreviewGrid, type PreviewGridHandle } from './components/preview/PreviewGrid'
 import { SelectionToolbar } from './components/preview/SelectionToolbar'
 import { MediaLightbox } from './components/media/MediaLightbox'
 import { ContextMenu, type ContextMenuItem } from './components/ui/ContextMenu'
@@ -139,6 +139,7 @@ export default function App() {
   const [deletingTags, setDeletingTags] = useState<Set<string>>(() => new Set())
   const [thumbnailVersion, setThumbnailVersion] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const previewGridRef = useRef<PreviewGridHandle>(null)
 
   useEffect(() => {
     if (!sidebarPrunePaths.length) return
@@ -200,7 +201,6 @@ export default function App() {
   const loadTaggedMedia = useCallback(async (paths: string[]) => {
     setLoading(true)
     setViewMode('media')
-    setMedia([])
     try {
       const res = await api.getTaggedMedia(paths)
       setViewMode('media')
@@ -321,19 +321,25 @@ export default function App() {
   }
 
   const reloadCurrentPreview = useCallback(async () => {
+    const scrollState = previewGridRef.current?.getScrollState()
     if (filter.selected_tags.length > 0) {
       const scope = getTagFilterScopePaths()
       if (scope.length) await loadTaggedMedia(scope)
-      return
+    } else {
+      const paths = selectedTreePaths.length
+        ? selectedTreePaths
+        : scopePath.includes('||')
+          ? scopePath.split('||').filter(Boolean)
+          : scopePath
+            ? [scopePath]
+            : []
+      if (paths.length) await loadFolder(paths)
     }
-    const paths = selectedTreePaths.length
-      ? selectedTreePaths
-      : scopePath.includes('||')
-        ? scopePath.split('||').filter(Boolean)
-        : scopePath
-          ? [scopePath]
-          : []
-    if (paths.length) await loadFolder(paths)
+    if (scrollState) {
+      requestAnimationFrame(() => {
+        previewGridRef.current?.restoreScrollState(scrollState)
+      })
+    }
   }, [filter.selected_tags, getTagFilterScopePaths, loadFolder, loadTaggedMedia, scopePath, selectedTreePaths])
 
   const handleTreeSelect = async (paths: string[], node: TreeNode) => {
@@ -534,6 +540,16 @@ export default function App() {
     await loadFolder(selectedTreePaths.length ? selectedTreePaths : [parent])
   }
 
+  const applyTagsToPreviewItems = useCallback((paths: string[], tags: string[]) => {
+    const pathSet = new Set(paths)
+    setMedia((current) =>
+      current.map((item) => (pathSet.has(item.path) ? { ...item, tags } : item)),
+    )
+    setEntries((current) =>
+      current.map((item) => (pathSet.has(item.path) ? { ...item, tags } : item)),
+    )
+  }, [])
+
   const promptEditTags = async (paths: string[], currentTags: string[]) => {
     const uniquePaths = Array.from(new Set(paths)).filter(Boolean)
     if (!uniquePaths.length) return
@@ -548,7 +564,11 @@ export default function App() {
       const res = await api.setTags(uniquePaths, tags)
       setStatus(res.message)
       await loadTags()
-      await reloadCurrentPreview()
+      if (filter.selected_tags.length > 0) {
+        await reloadCurrentPreview()
+      } else {
+        applyTagsToPreviewItems(uniquePaths, tags)
+      }
     } catch (e) {
       setStatus(`編輯標籤失敗：${e}`)
     }
@@ -891,6 +911,7 @@ export default function App() {
           onApplyDuration={() => updateFilter({})}
         />
         <PreviewGrid
+          ref={previewGridRef}
           viewMode={viewMode}
           entries={entries}
           media={media}

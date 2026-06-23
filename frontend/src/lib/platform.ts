@@ -51,14 +51,14 @@ const DESKTOP_LOCAL_SCRUB_PROFILE: VideoScrubProfile = {
   showNativeControls: false,
 }
 
-/** macOS WKWebView 的 asset 播放 seek 需更頻繁同步，避免受控 range 與影片時間打架。 */
+/** macOS WKWebView asset 播放改用原生 controls，避免自訂 coarse scrub 飄動。 */
 const DESKTOP_MAC_ASSET_SCRUB_PROFILE: VideoScrubProfile = {
   coarsePreviewMs: 16,
   finePreviewMs: 16,
   minDeltaSeconds: 0.008,
   waitForSeeked: false,
   preload: 'auto',
-  showNativeControls: false,
+  showNativeControls: true,
 }
 
 const DESKTOP_HTTP_SCRUB_PROFILE: VideoScrubProfile = {
@@ -95,8 +95,17 @@ export function getRecommendedDevCommand(): string {
   return 'npm run tauri:dev'
 }
 
+export function isMacDesktopApp(): boolean {
+  if (!isDesktopApp()) return false
+  return /Mac|iPhone|iPad|iPod/.test(navigator.userAgent)
+}
+
+export function supportsNativeMpvEmbed(): boolean {
+  return isDesktopApp() && !isMacDesktopApp()
+}
+
 export function supportsMpvEmbed(): boolean {
-  return isDesktopApp()
+  return supportsNativeMpvEmbed()
 }
 
 export function supportsAssetPlayback(): boolean {
@@ -108,12 +117,16 @@ export function supportsNativeFileDrag(): boolean {
 }
 
 export function shouldProbeNativeMpv(): boolean {
-  return supportsMpvEmbed()
+  return supportsNativeMpvEmbed()
 }
 
-function isMacDesktopApp(): boolean {
-  if (!isDesktopApp()) return false
-  return /Mac|iPhone|iPad|iPod/.test(navigator.userAgent)
+export function shouldUseCustomVideoScrub(
+  playback: MediaPlaybackSource | null,
+  mpvActive: boolean,
+): boolean {
+  if (mpvActive) return true
+  if (isMacDesktopApp() && playback?.via === 'asset') return false
+  return true
 }
 
 export function getVideoScrubProfile(playback: MediaPlaybackSource | null): VideoScrubProfile {

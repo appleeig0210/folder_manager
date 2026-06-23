@@ -3,9 +3,9 @@ import { ChevronLeft, ChevronRight, ExternalLink, Tag, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react'
 import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
-import { prepareStreamableVideo, resolveMediaPlaybackSource, type MediaPlaybackSource } from '../../lib/mediaPlayback'
+import { prepareStreamableVideo, resolveMediaImageSource, resolveMediaPlaybackSource, type MediaPlaybackSource } from '../../lib/mediaPlayback'
 import { isNativeMpvAvailable, mpvDetach, mpvGetDuration, mpvGetTime, mpvSeek, mpvSetMuted, mpvSetPaused, mpvSetVolume } from '../../lib/mpvPlayer'
-import { getMpvScrubProfile, getVideoScrubProfile, isDesktopApp, shouldProbeNativeMpv, shouldUseServerFrameExtract, type VideoScrubProfile } from '../../lib/platform'
+import { getMpvScrubProfile, getVideoScrubProfile, isDesktopApp, shouldProbeNativeMpv, shouldUseCustomVideoScrub, shouldUseServerFrameExtract, supportsNativeMpvEmbed, type VideoScrubProfile } from '../../lib/platform'
 import { getVideoPlaybackModeInfo, playbackModeBadgeClass } from '../../lib/playbackDiagnostics'
 import { isAppModalInteraction, isAppModalOpen } from '../../lib/modal'
 import { WebVideoNotice } from './WebVideoNotice'
@@ -52,6 +52,8 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const [scrubMode, setScrubMode] = useState<'coarse' | 'fine' | null>(null)
   const [scrubDraftTime, setScrubDraftTime] = useState<number | null>(null)
   const [videoPlayback, setVideoPlayback] = useState<MediaPlaybackSource | null>(null)
+  const [imagePlayback, setImagePlayback] = useState<MediaPlaybackSource | null>(null)
+  const [imageHttpFallbackTried, setImageHttpFallbackTried] = useState(false)
   const [videoVolume, setVideoVolume] = useState(loadStoredVideoVolume)
   const [videoMuted, setVideoMuted] = useState(false)
   const [mpvMode, setMpvMode] = useState(false)
@@ -86,6 +88,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const mpvReadyRef = useRef(false)
   const mpvRemountCountRef = useRef(0)
   const htmlFallbackTriedRef = useRef(false)
+  const videoHttpFallbackTriedRef = useRef(false)
   const mpvPausedRef = useRef(false)
   const lastPolledMpvTimeRef = useRef(0)
   const [mpvLayoutRevision, setMpvLayoutRevision] = useState(0)
@@ -119,7 +122,9 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   const coarseProgress = controlDuration > 0
     ? Math.min(100, (coarseSeekValue / controlDuration) * 100)
     : coarseSeekProgress
-  const showVideoControls = item?.media_type === 'video' && !loadError
+  const useCustomVideoScrub = shouldUseCustomVideoScrub(videoPlayback, mpvMode && mpvReady)
+  const showVideoControls = item?.media_type === 'video' && !loadError && useCustomVideoScrub
+  const videoPlaybackPending = item?.media_type === 'video' && !mpvMode && !videoPlayback?.src
   const playbackModeInfo = useMemo(() => {
     if (item?.media_type !== 'video') return null
     return getVideoPlaybackModeInfo({
@@ -142,7 +147,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
   }, [])
 
   const retryMpvPlayback = useCallback(() => {
-    if (!item || item.media_type !== 'video' || !shouldProbeNativeMpv()) return
+    if (!item || item.media_type !== 'video' || !supportsNativeMpvEmbed()) return
     resetMpvAttachState()
     mpvReadyRef.current = false
     mpvModeRef.current = true
@@ -184,19 +189,23 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     setIndex(initialIndex)
     setLayoutReady(false)
     layoutAttachTokenRef.current = ''
-  }, [initialIndex, items])
+  }, [initialIndex])
 
   useLayoutEffect(() => {
-    if (activeIndex >= 0) {
-      if (activeIndex !== index) setIndex(activeIndex)
-      return
+    const preservedId = activeItemIdRef.current
+    if (preservedId) {
+      const nextIndex = items.findIndex((candidate) => candidate.id === preservedId)
+      if (nextIndex >= 0) {
+        if (nextIndex !== index) setIndex(nextIndex)
+        return
+      }
     }
-
     if (items.length > 0) {
-      activeItemIdRef.current = items[resolvedIndex]?.id
-      if (resolvedIndex !== index) setIndex(resolvedIndex)
+      const fallback = Math.min(Math.max(0, initialIndex), items.length - 1)
+      activeItemIdRef.current = items[fallback]?.id
+      if (fallback !== index) setIndex(fallback)
     }
-  }, [activeIndex, index, items, resolvedIndex])
+  }, [items, initialIndex, index])
 
   const captureVideoFrame = useCallback(() => {
     const video = videoRef.current
@@ -298,7 +307,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       return
     }
 
-    if (!htmlFallbackTriedRef.current && shouldProbeNativeMpv()) {
+    if (!htmlFallbackTriedRef.current && supportsNativeMpvEmbed()) {
       htmlFallbackTriedRef.current = true
       mpvModeRef.current = false
       mpvReadyRef.current = false
@@ -751,6 +760,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     setScrubbing(false)
     setScrubMode(null)
     setScrubDraftTime(null)
+    setLoadError(false)
     scrubbingRef.current = false
     scrubPointerActiveRef.current = false
     scrubModeRef.current = null
@@ -819,6 +829,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     setMpvReady(false)
     setMpvProbeDone(false)
     setVideoPlayback(null)
+    videoHttpFallbackTriedRef.current = false
     setLoaded(false)
     setLoadError(false)
     setMpvSurfaceKey((value) => value + 1)
@@ -858,6 +869,35 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
       void mpvDetach().catch(() => {})
     }
   }, [item?.id, item?.media_type, item?.path, resetMpvAttachState])
+
+  useEffect(() => {
+    if (item?.media_type === 'video') {
+      setImagePlayback(null)
+      setImageHttpFallbackTried(false)
+      return
+    }
+
+    let cancelled = false
+    setImagePlayback(null)
+    setImageHttpFallbackTried(false)
+    setLoaded(false)
+    setLoadError(false)
+
+    void resolveMediaImageSource(item?.path ?? '').then((source) => {
+      if (!cancelled) setImagePlayback(source)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [item?.id, item?.media_type, item?.path])
+
+  useEffect(() => {
+    if (item?.media_type !== 'video') return
+    if (mpvMode || videoPlayback?.src) {
+      setLoadError(false)
+    }
+  }, [item?.media_type, mpvMode, videoPlayback?.src])
 
   useEffect(() => {
     if (!playbackModeInfo || item?.media_type !== 'video') return
@@ -1074,7 +1114,9 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
             className="relative w-full h-full flex items-center justify-center"
             onContextMenu={handlePreviewContextMenu}
           >
-            {!loaded && !loadError && !(item.media_type === 'video' && mpvPlaybackFailed) && (
+            {((!loaded && !loadError && !(item.media_type === 'video' && mpvPlaybackFailed))
+              || videoPlaybackPending
+              || (item.media_type !== 'video' && !loadError && !imagePlayback?.src)) && (
               <div className="absolute inset-0 flex items-center justify-center text-white/50">
                 {item.media_type === 'video' && mpvMode && mpvRetryAttempt > 0
                   ? `mpv 重試中 (${mpvRetryAttempt}/${mpvRetryMax})…`
@@ -1109,7 +1151,7 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                   onError={handleMpvError}
                   onRetry={handleMpvRetry}
                 />
-                {mpvPlaybackFailed ? (
+                {mpvPlaybackFailed && supportsNativeMpvEmbed() ? (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-[var(--radius-md)] bg-black/80 text-white/80">
                     <p className="text-sm">mpv 無法嵌入此影片，可重試或改用系統播放器。</p>
                     <Button size="sm" variant="secondary" onClick={retryMpvPlayback}>
@@ -1168,21 +1210,33 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                   setFineSeekCenter(current)
                 }}
                 onError={() => {
-                  if (shouldProbeNativeMpv()) {
+                  if (supportsNativeMpvEmbed()) {
                     retryMpvPlayback()
+                    return
+                  }
+                  if (videoPlayback?.via === 'asset' && !videoHttpFallbackTriedRef.current) {
+                    videoHttpFallbackTriedRef.current = true
+                    prepareStreamableVideo(item.path)
+                    setVideoPlayback({
+                      src: api.mediaFileUrl(item.path),
+                      crossOrigin: 'anonymous',
+                      via: 'http',
+                    })
+                    setLoadError(false)
+                    setLoaded(false)
                     return
                   }
                   setLoadError(true)
                   setLoaded(true)
                 }}
               />
-            ) : (
+            ) : item.media_type === 'video' ? null : imagePlayback?.src ? (
               <motion.img
-                key={item.id}
+                key={`${item.id}:${imagePlayback.via}`}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: loaded ? 1 : 0 }}
                 transition={{ duration: 0.2 }}
-                src={api.mediaFileUrl(item.path)}
+                src={imagePlayback.src}
                 alt={item.name}
                 draggable={false}
                 onDragStart={(e) => e.preventDefault()}
@@ -1190,11 +1244,18 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
                 className="max-w-full max-h-full object-contain rounded-[var(--radius-md)] shadow-2xl"
                 onLoad={() => setLoaded(true)}
                 onError={() => {
+                  if (imagePlayback?.via === 'asset' && !imageHttpFallbackTried) {
+                    setImageHttpFallbackTried(true)
+                    setImagePlayback({ src: api.mediaFileUrl(item.path), via: 'http' })
+                    setLoadError(false)
+                    setLoaded(false)
+                    return
+                  }
                   setLoadError(true)
                   setLoaded(true)
                 }}
               />
-            )}
+            ) : null}
           </div>
 
           <button

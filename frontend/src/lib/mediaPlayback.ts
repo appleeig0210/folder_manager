@@ -7,19 +7,33 @@ export type MediaPlaybackSource = {
   via: 'asset' | 'http'
 }
 
-export async function resolveMediaPlaybackSource(filePath: string): Promise<MediaPlaybackSource> {
-  if (isDesktopApp()) {
-    try {
-      const { convertFileSrc } = await import('@tauri-apps/api/core')
-      return { src: convertFileSrc(filePath), via: 'asset' }
-    } catch {
-      // Fall back to HTTP when asset protocol is unavailable.
-    }
+async function resolveAssetSource(filePath: string): Promise<MediaPlaybackSource | null> {
+  if (!isDesktopApp()) return null
+  try {
+    const { convertFileSrc } = await import('@tauri-apps/api/core')
+    return { src: convertFileSrc(filePath), via: 'asset' }
+  } catch {
+    return null
   }
+}
+
+export async function resolveMediaPlaybackSource(filePath: string): Promise<MediaPlaybackSource> {
+  const asset = await resolveAssetSource(filePath)
+  if (asset) return asset
 
   return {
     src: api.mediaFileUrl(filePath),
     crossOrigin: 'anonymous',
+    via: 'http',
+  }
+}
+
+export async function resolveMediaImageSource(filePath: string): Promise<MediaPlaybackSource> {
+  const asset = await resolveAssetSource(filePath)
+  if (asset) return asset
+
+  return {
+    src: api.mediaFileUrl(filePath),
     via: 'http',
   }
 }

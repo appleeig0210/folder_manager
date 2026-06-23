@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { EntryItem, MediaItem, ViewMode } from '../../api/types'
 import { EntryCard } from './EntryCard'
 import { MediaCard } from './MediaCard'
@@ -48,6 +48,16 @@ interface PreviewGridProps {
   onReorder?: (fromId: string, toId: string, position: 'before' | 'after') => void
 }
 
+export type PreviewScrollState = {
+  scrollTop: number
+  anchorId: string | null
+}
+
+export type PreviewGridHandle = {
+  getScrollState: () => PreviewScrollState
+  restoreScrollState: (state: PreviewScrollState) => void
+}
+
 function getAutoScrollStep(clientY: number, parent: HTMLDivElement) {
   const rect = parent.getBoundingClientRect()
   const topDistance = clientY - rect.top
@@ -64,7 +74,7 @@ function getAutoScrollStep(clientY: number, parent: HTMLDivElement) {
   return 0
 }
 
-export function PreviewGrid({
+export const PreviewGrid = forwardRef<PreviewGridHandle, PreviewGridProps>(function PreviewGrid({
   viewMode,
   entries,
   media,
@@ -78,7 +88,7 @@ export function PreviewGrid({
   onContextMenu,
   sortable,
   onReorder,
-}: PreviewGridProps) {
+}, ref) {
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<{ id: string; position: 'before' | 'after' } | null>(null)
   const [dropIndicator, setDropIndicator] = useState<{ left: number; top: number; height: number } | null>(null)
@@ -173,6 +183,31 @@ export function PreviewGrid({
     estimateSize: () => rowHeight,
     overscan: 2,
   })
+
+  useImperativeHandle(ref, () => ({
+    getScrollState: () => {
+      const parent = parentRef.current
+      if (!parent) return { scrollTop: 0, anchorId: null }
+      const scrollTop = parent.scrollTop
+      const firstVisibleRow = Math.max(0, Math.floor(scrollTop / rowHeight))
+      const firstVisibleIndex = Math.min(gridCells.length - 1, firstVisibleRow * columnCount)
+      const anchorId = gridCells[firstVisibleIndex]?.item.id ?? null
+      return { scrollTop, anchorId }
+    },
+    restoreScrollState: (state: PreviewScrollState) => {
+      const parent = parentRef.current
+      if (!parent) return
+      if (state.anchorId) {
+        const anchorIndex = gridCells.findIndex((cell) => cell.item.id === state.anchorId)
+        if (anchorIndex >= 0) {
+          const row = Math.floor(anchorIndex / columnCount)
+          parent.scrollTop = row * rowHeight
+          return
+        }
+      }
+      parent.scrollTop = state.scrollTop
+    },
+  }), [columnCount, gridCells, rowHeight])
 
   useLayoutEffect(() => {
     rowVirtualizer.measure()
@@ -415,4 +450,4 @@ export function PreviewGrid({
       </div>
     </div>
   )
-}
+})
