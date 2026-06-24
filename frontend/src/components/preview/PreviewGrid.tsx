@@ -3,6 +3,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import type { EntryItem, MediaItem, ViewMode } from '../../api/types'
 import { EntryCard } from './EntryCard'
 import { MediaCard } from './MediaCard'
+import { PreviewLoadingState } from './PreviewLoadingState'
 import { supportsNativeFileDrag } from '../../lib/platform'
 import { startNativeFileDrag } from '../../lib/nativeDrag'
 
@@ -320,19 +321,13 @@ export const PreviewGrid = forwardRef<PreviewGridHandle, PreviewGridProps>(funct
     }
   }
 
+  if (loading && !initializing) {
+    return <PreviewLoadingState />
+  }
+
   if (!gridCells.length) {
-    if (initializing || loading) {
-      const message = initializing
-        ? '載入中，請稍後…'
-        : viewMode === 'media'
-          ? '媒體讀取中…'
-          : '資料夾內容讀取中…'
-      return (
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-[var(--color-text-muted)] text-sm">
-          <span className="w-5 h-5 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin" />
-          {message}
-        </div>
-      )
+    if (initializing) {
+      return <PreviewLoadingState label="初始化" />
     }
     return (
       <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)] text-sm">

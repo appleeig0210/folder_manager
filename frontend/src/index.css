@@ -245,3 +245,48 @@ body {
   background: var(--color-accent);
   box-shadow: 0 0 0 2px rgb(255 255 255 / 0.9);
 }
+
+.loading-dots {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1px;
+  min-width: 1.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.loading-dots span {
+  display: inline-block;
+  animation: loading-dot-bounce 1.2s infinite ease-in-out both;
+}
+
+.loading-dots span:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.loading-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.loading-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.loading-dots span:nth-child(4) {
+  animation-delay: 0.45s;
+}
+
+@keyframes loading-dot-bounce {
+  0%,
+  70%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+
+  35% {
+    opacity: 1;
+    transform: translateY(-5px);
+  }
+}

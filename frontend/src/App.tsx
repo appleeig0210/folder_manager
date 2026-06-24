@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api/client'
 import type {
+  BreadcrumbItem,
   EntryItem,
   FilterState,
   MediaItem,
@@ -60,6 +61,25 @@ function formatPreviewLoadStatus(entries: EntryItem[], mediaCount: number): stri
     return `已載入 ${entryPart}、${mediaCount} 個直接媒體（子資料夾另含 ${nestedMedia} 個）`
   }
   return `已載入 ${entryPart}、${mediaCount} 個媒體`
+}
+
+type PreviewLoadOptimistic = {
+  scopeLabel?: string
+  scopePath?: string
+  breadcrumb?: BreadcrumbItem[]
+}
+
+function appendBreadcrumbTrail(current: BreadcrumbItem[], entry: EntryItem): BreadcrumbItem[] {
+  if (current.some((item) => normalizeId(item.path) === normalizeId(entry.path))) {
+    return current
+  }
+  return [...current, { name: entry.subfolder_name, path: entry.path }]
+}
+
+function folderDisplayName(path: string, fallback?: string): string {
+  if (fallback?.trim()) return fallback.trim()
+  const parts = path.split(/[/\\]/).filter(Boolean)
+  return parts[parts.length - 1] ?? path
 }
 
 function replacePathSegment(path: string, _oldSegment: string, newSegment: string): string {
@@ -207,17 +227,35 @@ export default function App() {
 
   const loadFolder = useCallback(async (
     pathOrPaths: string | string[],
-    options?: { clearPreview?: boolean },
+    options?: { optimistic?: PreviewLoadOptimistic },
   ) => {
     const seq = ++previewLoadSeqRef.current
+    const paths = Array.isArray(pathOrPaths) ? pathOrPaths.filter(Boolean) : [pathOrPaths].filter(Boolean)
     setLoading(true)
     setViewMode('folder')
+    setEntries([])
+    setMedia([])
+    setSelectedIds(new Set())
     setStatus('正在載入預覽…')
-    if (options?.clearPreview) {
-      setEntries([])
-      setMedia([])
-      setSelectedIds(new Set())
+
+    if (options?.optimistic) {
+      const optimistic = options.optimistic
+      if (optimistic.scopeLabel) setScopeLabel(optimistic.scopeLabel)
+      if (optimistic.scopePath) setScopePath(optimistic.scopePath)
+      if (optimistic.breadcrumb?.length) setBreadcrumb(optimistic.breadcrumb)
+    } else if (paths.length === 1) {
+      const targetPath = paths[0]
+      setScopePath(targetPath)
+      setScopeLabel(folderDisplayName(targetPath))
+      void api.getBreadcrumb(targetPath).then((crumbs) => {
+        if (seq === previewLoadSeqRef.current) setBreadcrumb(crumbs)
+      }).catch(() => {})
+    } else if (paths.length > 1) {
+      setScopePath(paths.join('||'))
+      setScopeLabel(`已合併 ${paths.length} 個資料夾`)
+      setBreadcrumb([])
     }
+
     try {
       const res = await api.getFolder(pathOrPaths)
       if (seq !== previewLoadSeqRef.current) return null
@@ -241,11 +279,25 @@ export default function App() {
     }
   }, [])
 
-  const loadTaggedMedia = useCallback(async (paths: string[]) => {
+  const loadTaggedMedia = useCallback(async (
+    paths: string[],
+    options?: { optimistic?: PreviewLoadOptimistic },
+  ) => {
     const seq = ++previewLoadSeqRef.current
     setLoading(true)
     setViewMode('media')
+    setEntries([])
+    setMedia([])
+    setSelectedIds(new Set())
     setStatus('正在載入預覽…')
+
+    if (options?.optimistic) {
+      const optimistic = options.optimistic
+      if (optimistic.scopeLabel) setScopeLabel(optimistic.scopeLabel)
+      if (optimistic.scopePath) setScopePath(optimistic.scopePath)
+      if (optimistic.breadcrumb?.length) setBreadcrumb(optimistic.breadcrumb)
+    }
+
     try {
       const res = await api.getTaggedMedia(paths)
       if (seq !== previewLoadSeqRef.current) return null
@@ -430,23 +482,43 @@ export default function App() {
     }
     setSelectedTreeTypes(nextTypes)
 
+    const scopePaths = paths.length ? paths : config.root_folder ? [config.root_folder] : []
     if (filter.selected_tags.length > 0) {
-      await loadTaggedMedia(paths.length ? paths : config.root_folder ? [config.root_folder] : [])
+      await loadTaggedMedia(scopePaths)
       return
     }
 
-    await loadFolder(paths.length ? paths : config.root_folder ? [config.root_folder] : [])
+    if (scopePaths.length === 1) {
+      const targetPath = scopePaths[0]
+      const knownNode = targetPath === node.path ? node : findTreeNode(targetPath)
+      await loadFolder(targetPath, {
+        optimistic: {
+          scopePath: targetPath,
+          scopeLabel: folderDisplayName(targetPath, knownNode?.name),
+        },
+      })
+      return
+    }
+
+    await loadFolder(scopePaths)
   }
 
   const handleNavigate = async (path: string) => {
     setSelectedTreePaths([path])
     const node = findTreeNode(path)
     setSelectedTreeTypes({ [path]: classifyTreePath(path, node?.type) })
+    const crumbIndex = breadcrumb.findIndex((item) => normalizeId(item.path) === normalizeId(path))
+    const nextBreadcrumb = crumbIndex >= 0 ? breadcrumb.slice(0, crumbIndex + 1) : breadcrumb
+    const optimistic = {
+      scopePath: path,
+      scopeLabel: folderDisplayName(path, nextBreadcrumb[nextBreadcrumb.length - 1]?.name ?? node?.name),
+      breadcrumb: nextBreadcrumb.length ? nextBreadcrumb : undefined,
+    }
     if (filter.selected_tags.length > 0) {
-      await loadTaggedMedia([path])
+      await loadTaggedMedia([path], { optimistic })
       return
     }
-    await loadFolder(path)
+    await loadFolder(path, { optimistic })
   }
 
   const handleSelect = (id: string, e: React.MouseEvent, index: number) => {
@@ -485,7 +557,13 @@ export default function App() {
   const handleDoubleClickEntry = async (item: EntryItem) => {
     setSelectedTreePaths([item.path])
     setSelectedTreeTypes({ [item.path]: classifyTreePath(item.path, 'subfolder') })
-    await loadFolder(item.path)
+    await loadFolder(item.path, {
+      optimistic: {
+        scopePath: item.path,
+        scopeLabel: item.subfolder_name,
+        breadcrumb: appendBreadcrumbTrail(breadcrumb, item),
+      },
+    })
   }
 
   const getContextItems = (targetId: string): ContextMenuItem[] => {
