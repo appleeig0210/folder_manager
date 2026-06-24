@@ -94,13 +94,12 @@ class PreviewService:
             self._folder_tag_filter_cache[cache_key] = False
             return False
 
-        keywords_map = self.keyword_service.read_keywords_batch([item.media_path for item in items])
-        matched = False
-        for item in items:
-            tags = keywords_map.get(str(item.media_path.resolve()), [])
-            if self.keyword_service.tags_match_any_selected(tags, selected_tags):
-                matched = True
-                break
+        media_paths = [item.media_path for item in items]
+        matched = self.keyword_service.folder_has_tagged_media_from_index(
+            folder,
+            selected_tags,
+            media_paths,
+        )
         self._folder_tag_filter_cache[cache_key] = matched
         return matched
 

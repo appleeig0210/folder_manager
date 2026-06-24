@@ -147,6 +147,8 @@ def get_folder(
         if not folder.is_dir():
             raise HTTPException(status_code=400, detail=f"路徑不是資料夾：{folder}")
 
+    ctx.keyword_service.reconcile_scope(folders)
+
     if len(folders) == 1:
         folder = folders[0]
         scope_path = str(folder)
@@ -410,6 +412,8 @@ def get_tagged_media(
     scope_paths = [Path(p).resolve() for p in paths if p]
     if not scope_paths:
         scope_paths = [root]
+
+    ctx.keyword_service.reconcile_scope(scope_paths)
 
     display = ctx.preview_service.scan_tagged_media_in_scope(
         scope_paths,

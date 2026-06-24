@@ -85,6 +85,8 @@ export interface ConfigResponse {
 export interface TagListResponse {
   all_tags: string[]
   filter_state: FilterState
+  index_ready?: boolean
+  scanning?: boolean
 }
 
 export interface StatusResponse {
@@ -95,4 +97,5 @@ export interface StatusResponse {
   saved_path?: string | null
   conflicts?: { source_path: string; target_path: string; name: string }[] | null
   deleted_sources?: string[] | null
+  all_tags?: string[] | null
 }

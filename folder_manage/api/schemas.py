@@ -95,6 +95,8 @@ class FilterState(BaseModel):
 class TagListResponse(BaseModel):
     all_tags: list[str]
     filter_state: FilterState
+    index_ready: bool = True
+    scanning: bool = False
 
 
 class SetTagsRequest(BaseModel):
@@ -162,6 +164,7 @@ class StatusResponse(BaseModel):
     saved_path: Optional[str] = None
     conflicts: Optional[list[dict[str, str]]] = None
     deleted_sources: Optional[list[str]] = None
+    all_tags: Optional[list[str]] = None
 
 
 class ImportTagsRequest(BaseModel):

@@ -65,6 +65,7 @@ class AppContext:
         root_path = Path(root_folder)
         if root_path.exists() and root_path.is_dir():
             self.store.set_root_folder(root_path)
+            self.keyword_service.bind_root_folder(root_path.resolve())
 
     def _run_folder_tags_migration(self) -> None:
         try:
@@ -74,6 +75,7 @@ class AppContext:
 
     def shutdown(self) -> None:
         self.thumbnail_service.flush_disk_index()
+        self.keyword_service.close()
         self.scan_coordinator.shutdown()
 
 

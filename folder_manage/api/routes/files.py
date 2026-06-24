@@ -66,6 +66,30 @@ def _sync_manual_order_after_rename(order_map: dict[str, list[str]], plan: list[
     order_map.update(updated)
 
 
+def _sync_tag_index_renames(ctx, plan: list[tuple[Path, Path]]) -> None:
+    for old, new in plan:
+        if old.resolve() == new.resolve():
+            continue
+        if old.is_dir() or new.is_dir():
+            ctx.keyword_service.rename_index_prefix(old, new)
+        else:
+            ctx.keyword_service.rename_index_path(old, new)
+
+
+def _sync_tag_index_deletes(ctx, paths: list[Path]) -> None:
+    for path in paths:
+        resolved = Path(path).resolve()
+        if resolved.is_dir():
+            ctx.keyword_service.delete_index_under_prefix(resolved)
+        else:
+            ctx.keyword_service.delete_index_path(resolved)
+
+
+def _sync_tag_index_scopes(ctx, folders: list[Path]) -> None:
+    if folders:
+        ctx.keyword_service.reconcile_scope(folders)
+
+
 def _remove_deleted_folders_from_tree_order(ctx, deleted_folders: list[str]) -> None:
     order_map = ctx.config.get("tree_child_order")
     if not isinstance(order_map, dict):
@@ -108,6 +132,7 @@ def rename_folder(body: RenameFolderRequest) -> StatusResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _sync_manual_order_after_rename(ctx.manual_entry_order, [(old_path, new_path)])
     _sync_manual_order_after_rename(ctx.manual_media_order, [(old_path, new_path)])
+    _sync_tag_index_renames(ctx, [(old_path, new_path)])
     return StatusResponse(message=f"已重新命名：{new_path.name}")
 
 
@@ -118,6 +143,7 @@ def delete_folder(path: str) -> StatusResponse:
         count = ctx.file_ops.delete_folder(Path(path))
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _sync_tag_index_deletes(ctx, [Path(path)])
     return StatusResponse(message=f"已刪除資料夾（移除 {count} 個檔案）")
 
 
@@ -130,6 +156,7 @@ def rename_file(body: RenameFileRequest) -> StatusResponse:
     except (ValueError, FileExistsError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _sync_manual_order_after_rename(ctx.manual_media_order, [(old_path, new_path)])
+    _sync_tag_index_renames(ctx, [(old_path, new_path)])
     return StatusResponse(message=f"已重新命名：{new_path.name}")
 
 
@@ -176,6 +203,7 @@ def save_video_frame(body: SaveVideoFrameRequest) -> StatusResponse:
 def delete_files(body: DeleteFilesRequest) -> StatusResponse:
     ctx = get_ctx()
     deleted, failed = ctx.file_ops.delete_files([Path(p) for p in body.paths])
+    _sync_tag_index_deletes(ctx, [Path(p) for p in body.paths])
     return StatusResponse(message=f"已刪除 {deleted} 個，失敗 {failed} 個")
 
 
@@ -204,6 +232,8 @@ def transfer_items(body: TransferRequest) -> StatusResponse:
             )
         except Exception as exc:
             messages.append(f"檔案轉移失敗: {exc}")
+    reconcile_folders = [target, *[p.parent for p in sources]]
+    _sync_tag_index_scopes(ctx, reconcile_folders)
     return StatusResponse(message="；".join(messages) or "完成")
 
 
@@ -232,6 +262,10 @@ def merge_folders(body: MergeFoldersRequest) -> StatusResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     _remove_deleted_folders_from_tree_order(ctx, result["deleted_sources"])
+    target_folder = Path(result["target_folder"]).resolve()
+    for deleted in result["deleted_sources"]:
+        ctx.keyword_service.delete_index_under_prefix(Path(deleted))
+    _sync_tag_index_scopes(ctx, [target_folder])
     return StatusResponse(
         message=(
             f"已合併至 {Path(result['target_folder']).name}："
@@ -259,6 +293,7 @@ def rename_numbered(body: NumberedRenameRequest) -> StatusResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _sync_manual_order_after_rename(ctx.manual_entry_order, plan)
     _sync_manual_order_after_rename(ctx.manual_media_order, plan)
+    _sync_tag_index_renames(ctx, plan)
     return StatusResponse(
         message=f"已重新命名 {len(paths)} 個項目",
         renamed_paths=[str(new.resolve()) for _old, new in plan],

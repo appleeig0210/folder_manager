@@ -225,22 +225,42 @@ class TreeService:
         want_image: bool,
     ) -> tuple[set[str], list[SubfolderEntry]]:
         matching_keys: set[str] = set()
-        try:
-            for dirpath, dirnames, _ in os.walk(person_folder):
-                for d in dirnames:
-                    path = Path(dirpath) / d
-                    try:
-                        rk = self.store.to_relative_key(path)
-                    except Exception:
-                        continue
-                    if self.preview.folder_contains_tagged_media(path, selected_filter_tags):
-                        if not self.preview.folder_matches_active_media_filter(
-                            path, lo_min, hi_min, want_video, want_image
-                        ):
+        if self.preview.keyword_service.index_ready:
+            matching_paths = self.preview.keyword_service.paths_with_any_tag(
+                selected_filter_tags,
+                under_prefix=person_folder,
+            )
+            for path_str in matching_paths:
+                path = Path(path_str)
+                if not path.is_file():
+                    continue
+                try:
+                    folder = path.parent
+                    rk = self.store.to_relative_key(folder)
+                except Exception:
+                    continue
+                if not self.preview.folder_matches_active_media_filter(
+                    folder, lo_min, hi_min, want_video, want_image
+                ):
+                    continue
+                matching_keys.add(rk)
+        else:
+            try:
+                for dirpath, dirnames, _ in os.walk(person_folder):
+                    for d in dirnames:
+                        path = Path(dirpath) / d
+                        try:
+                            rk = self.store.to_relative_key(path)
+                        except Exception:
                             continue
-                        matching_keys.add(rk)
-        except Exception:
-            return set(), []
+                        if self.preview.folder_contains_tagged_media(path, selected_filter_tags):
+                            if not self.preview.folder_matches_active_media_filter(
+                                path, lo_min, hi_min, want_video, want_image
+                            ):
+                                continue
+                            matching_keys.add(rk)
+            except Exception:
+                return set(), []
 
         entries: list[SubfolderEntry] = []
         for rk in sorted(matching_keys):

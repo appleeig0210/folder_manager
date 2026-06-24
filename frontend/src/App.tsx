@@ -47,6 +47,23 @@ function normalizeId(id: string): string {
   return id.replaceAll('\\', '/').toLocaleLowerCase()
 }
 
+function replacePathSegment(path: string, _oldSegment: string, newSegment: string): string {
+  const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  if (separatorIndex < 0) return newSegment
+  return `${path.slice(0, separatorIndex + 1)}${newSegment}`
+}
+
+function remapSelectedTreePaths(paths: string[], oldPath: string, newPath: string): string[] {
+  const oldNorm = normalizeId(oldPath)
+  return paths.map((path) => {
+    const pathNorm = normalizeId(path)
+    if (pathNorm === oldNorm) return newPath
+    if (pathNorm.startsWith(`${oldNorm}/`)) {
+      return `${newPath}${path.slice(oldPath.length)}`
+    }
+    return path
+  })
+}
 function replacePathFileName(path: string, fileName: string): string {
   const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   if (separatorIndex < 0) return fileName
@@ -166,6 +183,10 @@ export default function App() {
     const res = await api.getTags()
     setAllTags(res.all_tags)
     setFilter(res.filter_state)
+    if (res.scanning) {
+      setStatus((current) => (current === '就緒' || current.endsWith('…') ? '標籤索引建立中…' : current))
+    }
+    return res
   }, [])
 
   const loadFolder = useCallback(async (
@@ -237,8 +258,7 @@ export default function App() {
       await api.health()
       const cfg = await api.getConfig()
       setConfig(cfg)
-      await loadTags()
-      await refreshTree()
+      await Promise.all([loadTags(), refreshTree()])
       if (cfg.has_root && cfg.root_folder) {
         await loadFolder(cfg.root_folder)
         setSelectedTreePaths([cfg.root_folder])
@@ -255,6 +275,33 @@ export default function App() {
   useEffect(() => {
     init()
   }, [init])
+
+  useEffect(() => {
+    if (initializing || !config.has_root) return
+    let cancelled = false
+    let timer: number | undefined
+
+    const pollTagIndex = async () => {
+      try {
+        const res = await api.getTags()
+        if (cancelled) return
+        setAllTags(res.all_tags)
+        setFilter(res.filter_state)
+        if (res.scanning) {
+          setStatus((current) => (current.includes('索引建立中') ? current : '標籤索引建立中…'))
+          timer = window.setTimeout(pollTagIndex, 2000)
+        }
+      } catch {
+        // ignore background polling errors
+      }
+    }
+
+    void pollTagIndex()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [config.has_root, config.root_folder, initializing])
 
   const toggleTag = (tag: string) => {
     const key = foldCase(tag)
@@ -316,8 +363,7 @@ export default function App() {
     if ('selected_tags' in patch) {
       setTreeRevision((version) => version + 1)
     }
-    await refreshTree()
-    await reloadPreviewForSelection(res.filter_state, selectedTreePaths)
+    await Promise.all([refreshTree(), reloadPreviewForSelection(res.filter_state, selectedTreePaths)])
   }
 
   const reloadCurrentPreview = useCallback(async () => {
@@ -356,9 +402,7 @@ export default function App() {
       return
     }
 
-    await loadFolder(paths.length ? paths : config.root_folder ? [config.root_folder] : [], {
-      clearPreview: true,
-    })
+    await loadFolder(paths.length ? paths : config.root_folder ? [config.root_folder] : [])
   }
 
   const handleNavigate = async (path: string) => {
@@ -369,7 +413,7 @@ export default function App() {
       await loadTaggedMedia([path])
       return
     }
-    await loadFolder(path, { clearPreview: true })
+    await loadFolder(path)
   }
 
   const handleSelect = (id: string, e: React.MouseEvent, index: number) => {
@@ -408,7 +452,7 @@ export default function App() {
   const handleDoubleClickEntry = async (item: EntryItem) => {
     setSelectedTreePaths([item.path])
     setSelectedTreeTypes({ [item.path]: classifyTreePath(item.path, 'subfolder') })
-    await loadFolder(item.path, { clearPreview: true })
+    await loadFolder(item.path)
   }
 
   const getContextItems = (targetId: string): ContextMenuItem[] => {
@@ -545,8 +589,21 @@ export default function App() {
     setMedia((current) =>
       current.map((item) => (pathSet.has(item.path) ? { ...item, tags } : item)),
     )
-    setEntries((current) =>
-      current.map((item) => (pathSet.has(item.path) ? { ...item, tags } : item)),
+  }, [])
+
+  const applyAddedTagsToPreviewItems = useCallback((paths: string[], tags: string[]) => {
+    const pathSet = new Set(paths)
+    const mergeTags = (current: string[]) => {
+      const merged = [...current]
+      for (const tag of tags) {
+        if (!merged.some((existing) => foldCase(existing) === foldCase(tag))) {
+          merged.push(tag)
+        }
+      }
+      return merged
+    }
+    setMedia((current) =>
+      current.map((item) => (pathSet.has(item.path) ? { ...item, tags: mergeTags(item.tags) } : item)),
     )
   }, [])
 
@@ -563,7 +620,7 @@ export default function App() {
     try {
       const res = await api.setTags(uniquePaths, tags)
       setStatus(res.message)
-      await loadTags()
+      if (res.all_tags) setAllTags(res.all_tags)
       if (filter.selected_tags.length > 0) {
         await reloadCurrentPreview()
       } else {
@@ -595,8 +652,11 @@ export default function App() {
         return
       }
       setStatus(res.warnings?.length ? `${res.message}：${res.warnings.join('；')}` : res.message)
-      await loadTags()
-      await reloadCurrentPreview()
+      if (res.all_tags) setAllTags(res.all_tags)
+      applyAddedTagsToPreviewItems(uniquePaths, tags)
+      if (filter.selected_tags.length > 0) {
+        await reloadCurrentPreview()
+      }
     } catch (e) {
       setStatus(`添加標籤失敗：${e}`)
     }
@@ -643,10 +703,20 @@ export default function App() {
     const name = await promptText({ title: '新資料夾名稱：', defaultValue: current })
     if (!name || name === current) return
     const res = await api.renameFolder(path, name)
+    const newPath = replacePathSegment(path, current, name)
     setThumbnailVersion((version) => version + 1)
     setStatus(res.message)
+    setSelectedTreePaths((prev) => remapSelectedTreePaths(prev, path, newPath))
+    setSelectedTreeTypes((prev) => {
+      const next = { ...prev }
+      if (next[path]) {
+        next[newPath] = next[path]
+        delete next[path]
+      }
+      return next
+    })
     await refreshTree()
-    await loadFolder(selectedTreePaths)
+    await loadFolder(selectedTreePaths.length ? remapSelectedTreePaths(selectedTreePaths, path, newPath) : [newPath])
   }
 
   const promptRenameFile = async (path: string) => {
@@ -801,8 +871,7 @@ export default function App() {
       const rootPath = cfg.root_folder || path
       setConfig({ root_folder: rootPath, has_root: true })
       setStatus(res.message)
-      await loadTags()
-      await refreshTree()
+      await Promise.all([loadTags(), refreshTree()])
       setSelectedTreePaths([rootPath])
       setSelectedTreeTypes({ [rootPath]: 'root' })
       await loadFolder(rootPath)
@@ -820,7 +889,8 @@ export default function App() {
     const format = file.name.endsWith('.csv') ? 'csv' : 'json'
     const res = await api.importTags(content, format, true)
     setStatus(res.message)
-    await loadTags()
+    if (res.all_tags) setAllTags(res.all_tags)
+    else await loadTags()
     await refreshTree()
     e.target.value = ''
   }
@@ -882,9 +952,7 @@ export default function App() {
         onChooseFolder={chooseFolder}
         onRefresh={async () => {
           await api.invalidateTagCache()
-          await refreshTree()
-          await loadTags()
-          await reloadCurrentPreview()
+          await Promise.all([refreshTree(), loadTags(), reloadCurrentPreview()])
           setStatus('已刷新')
         }}
         onImportTags={handleImportTags}

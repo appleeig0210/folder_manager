@@ -34,5 +34,6 @@ def set_root_folder(body: SetRootRequest) -> StatusResponse:
     ctx.store.set_root_folder(path)
     ctx.config["root_folder"] = str(path.resolve())
     ctx.save_config()
+    ctx.keyword_service.bind_root_folder(path.resolve())
     ctx.preview_service.clear_filter_cache()
     return StatusResponse(message=f"已設定主資料夾：{path}")
