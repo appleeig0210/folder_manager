@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api/client'
 import type {
   BreadcrumbItem,
@@ -260,12 +260,14 @@ export default function App() {
       const res = await api.getFolder(pathOrPaths)
       if (seq !== previewLoadSeqRef.current) return null
       setViewMode('folder')
-      setEntries(res.entries)
-      setMedia(res.media)
       setScopeLabel(res.scope_label)
       setScopePath(res.scope_path)
       setBreadcrumb(res.breadcrumb)
-      setSelectedIds(new Set())
+      startTransition(() => {
+        setEntries(res.entries)
+        setMedia(res.media)
+        setSelectedIds(new Set())
+      })
       setStatus(formatPreviewLoadStatus(res.entries, res.media.length))
       return res
     } catch (e) {
@@ -302,12 +304,14 @@ export default function App() {
       const res = await api.getTaggedMedia(paths)
       if (seq !== previewLoadSeqRef.current) return null
       setViewMode('media')
-      setMedia(res.items)
-      setEntries([])
       setScopeLabel(res.scope_label)
       setScopePath(res.scope_path)
       setBreadcrumb(res.breadcrumb)
-      setSelectedIds(new Set())
+      startTransition(() => {
+        setMedia(res.items)
+        setEntries([])
+        setSelectedIds(new Set())
+      })
       setStatus(`已載入 ${res.items.length} 個符合標籤的媒體`)
       return res
     } catch (e) {
@@ -361,6 +365,9 @@ export default function App() {
     init()
   }, [init])
 
+  const allTagsKeyRef = useRef('')
+  const filterKeyRef = useRef('')
+
   useEffect(() => {
     if (initializing || !config.has_root) return
     let cancelled = false
@@ -370,8 +377,16 @@ export default function App() {
       try {
         const res = await api.getTags()
         if (cancelled) return
-        setAllTags(res.all_tags)
-        setFilter(res.filter_state)
+        const nextTagsKey = res.all_tags.join('\0')
+        const nextFilterKey = JSON.stringify(res.filter_state)
+        if (nextTagsKey !== allTagsKeyRef.current) {
+          allTagsKeyRef.current = nextTagsKey
+          setAllTags(res.all_tags)
+        }
+        if (nextFilterKey !== filterKeyRef.current) {
+          filterKeyRef.current = nextFilterKey
+          setFilter(res.filter_state)
+        }
         if (res.scanning) {
           setStatus((current) => (current.includes('索引建立中') ? current : '標籤索引建立中…'))
           timer = window.setTimeout(pollTagIndex, 2000)
@@ -445,10 +460,15 @@ export default function App() {
     const res = await api.updateFilter(next)
     setAllTags(res.all_tags)
     setFilter(res.filter_state)
-    if ('selected_tags' in patch) {
+    const tagSelectionChanged = 'selected_tags' in patch
+    if (tagSelectionChanged) {
       setTreeRevision((version) => version + 1)
     }
-    await Promise.all([refreshTree(), reloadPreviewForSelection(res.filter_state, selectedTreePaths)])
+    const reloadTasks: Promise<unknown>[] = [reloadPreviewForSelection(res.filter_state, selectedTreePaths)]
+    if (tagSelectionChanged) {
+      reloadTasks.push(refreshTree())
+    }
+    await Promise.all(reloadTasks)
   }
 
   const reloadCurrentPreview = useCallback(async () => {

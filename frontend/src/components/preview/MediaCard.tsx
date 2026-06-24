@@ -1,7 +1,7 @@
 import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
 import { cn } from '../../lib/utils'
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { GripVertical, Film, ImageIcon, Upload } from 'lucide-react'
 
 interface MediaCardProps {
@@ -22,7 +22,7 @@ interface MediaCardProps {
   onDrop?: (e: React.DragEvent<HTMLDivElement>) => void
 }
 
-export function MediaCard({
+export const MediaCard = memo(function MediaCard({
   item,
   selected,
   thumbnailVersion = 0,
@@ -152,4 +152,4 @@ export function MediaCard({
       </div>
     </div>
   )
-}
+})

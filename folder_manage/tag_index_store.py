@@ -272,6 +272,27 @@ class TagIndexStore:
             self._conn.commit()
         return len(stale)
 
+    def prune_stale_files_under_prefixes(self, prefixes: list[Path]) -> int:
+        """Remove index rows whose files no longer exist (no full disk walk)."""
+        stale: list[str] = []
+        for prefix in prefixes:
+            for path_str in self.paths_under_prefix(prefix):
+                try:
+                    if not Path(path_str).is_file():
+                        stale.append(path_str)
+                except OSError:
+                    stale.append(path_str)
+        if not stale:
+            return 0
+        with self._lock:
+            placeholders = ",".join("?" for _ in stale)
+            self._conn.execute(
+                f"DELETE FROM media_tags WHERE path IN ({placeholders})",
+                stale,
+            )
+            self._conn.commit()
+        return len(stale)
+
     def get_all_unique_tags(self) -> list[str]:
         merged: dict[str, str] = {}
         with self._lock:

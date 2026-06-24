@@ -625,14 +625,15 @@ class MediaKeywordService:
     ) -> None:
         if not folders:
             return
-        disk_files = self.list_media_files_in_scope(folders)
-        disk_set = {str(path.resolve()) for path in disk_files}
-        self._index.prune_orphans_under_prefixes(folders, disk_set)
-        if not scan_new_files:
+        if scan_new_files:
+            disk_files = self.list_media_files_in_scope(folders)
+            disk_set = {str(path.resolve()) for path in disk_files}
+            self._index.prune_orphans_under_prefixes(folders, disk_set)
+            _, misses = self._index.get_batch(disk_files)
+            if misses:
+                self.read_keywords_batch(misses[:scan_limit])
             return
-        _, misses = self._index.get_batch(disk_files)
-        if misses:
-            self.read_keywords_batch(misses[:scan_limit])
+        self._index.prune_stale_files_under_prefixes(folders)
 
     def schedule_background_rebuild(self, root: Path, *, delay_seconds: float = 0) -> None:
         root = Path(root).resolve()
