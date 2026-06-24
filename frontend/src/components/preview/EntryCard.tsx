@@ -48,23 +48,51 @@ export function EntryCard({
   useLayoutEffect(() => {
     if (!hoverSyncToken) return
     if (!hasFan || !getPointer) return
-    const { x, y, active } = getPointer()
-    if (!active) return
-    const el = cardRef.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
-    const inside =
-      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
-    if (!inside) {
-      setHovered(false)
-      return
+
+    let cancelled = false
+    let frame = 0
+
+    const pointerInsideCard = () => {
+      const { x, y, active } = getPointer()
+      if (!active) return false
+      const el = cardRef.current
+      if (!el) return false
+      const rect = el.getBoundingClientRect()
+      // A freshly mounted virtualized row may not have its final layout on the
+      // first frame; ignore zero-sized rects so we retry once layout settles.
+      if (rect.width === 0 || rect.height === 0) return null
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
     }
-    setHovered(false)
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        setHovered(true)
+
+    // Retry across a few frames because the row rect can be unsettled right after
+    // navigating into a new folder, which previously caused the fan-open to
+    // intermittently fail to trigger.
+    const evaluate = (attempt: number) => {
+      if (cancelled) return
+      const inside = pointerInsideCard()
+      if (inside === null && attempt < 3) {
+        frame = requestAnimationFrame(() => evaluate(attempt + 1))
+        return
+      }
+      if (!inside) {
+        setHovered(false)
+        return
+      }
+      setHovered(false)
+      frame = requestAnimationFrame(() => {
+        if (cancelled) return
+        frame = requestAnimationFrame(() => {
+          if (!cancelled) setHovered(true)
+        })
       })
-    })
+    }
+
+    evaluate(0)
+
+    return () => {
+      cancelled = true
+      if (frame) cancelAnimationFrame(frame)
+    }
   }, [getPointer, hasFan, hoverSyncToken])
 
   const startInternalDrag = (e: React.DragEvent<HTMLElement>) => {

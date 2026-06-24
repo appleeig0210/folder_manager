@@ -98,7 +98,7 @@ export const PreviewGrid = forwardRef<PreviewGridHandle, PreviewGridProps>(funct
   const autoScrollFrameRef = useRef<number | null>(null)
   const dragClientYRef = useRef<number | null>(null)
   const pointerRef = useRef({ x: 0, y: 0, active: false })
-  const prevLoadingRef = useRef(loading)
+  const hoverSyncSignatureRef = useRef<string | null>(null)
   const [hoverSyncToken, setHoverSyncToken] = useState(0)
   const getPointer = useCallback(() => pointerRef.current, [])
   const gridCells = useMemo(() => buildGridCells(viewMode, entries, media), [viewMode, entries, media])
@@ -115,13 +115,20 @@ export const PreviewGrid = forwardRef<PreviewGridHandle, PreviewGridProps>(funct
     return () => window.removeEventListener('mousemove', onMove)
   }, [])
 
+  // Re-trigger hover-driven fan-open when a folder list finishes loading under a
+  // stationary cursor. Tie it to the list content arriving (listSignature) rather
+  // than the loading flag flip, so deferred (startTransition) content updates still
+  // fire reliably after switching folders multiple times.
   useEffect(() => {
-    const wasLoading = prevLoadingRef.current
-    prevLoadingRef.current = loading
-    if (wasLoading && !loading && viewMode === 'folder' && entries.length > 0) {
-      setHoverSyncToken((value) => value + 1)
+    if (loading || dragId) return
+    if (viewMode !== 'folder' || entries.length === 0) {
+      hoverSyncSignatureRef.current = null
+      return
     }
-  }, [entries.length, loading, viewMode])
+    if (hoverSyncSignatureRef.current === listSignature) return
+    hoverSyncSignatureRef.current = listSignature
+    setHoverSyncToken((value) => value + 1)
+  }, [listSignature, entries.length, loading, viewMode, dragId])
 
   useLayoutEffect(() => {
     const parent = parentRef.current
