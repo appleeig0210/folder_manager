@@ -23,6 +23,7 @@ import { getPlatformLabel, isDesktopApp } from './lib/platform'
 import { isWebLimitedBannerDismissed, WebLimitedBanner } from './components/layout/WebLimitedBanner'
 import { foldCase } from './lib/foldCase'
 import { parseTagInput } from './lib/parseTagInput'
+import { mpvSetSurfaceVisible } from './lib/mpvPlayer'
 
 const DEFAULT_FILTER: FilterState = {
   selected_tags: [],
@@ -191,6 +192,7 @@ export default function App() {
   const [initializing, setInitializing] = useState(true)
   const [deletingTags, setDeletingTags] = useState<Set<string>>(() => new Set())
   const [thumbnailVersion, setThumbnailVersion] = useState(0)
+  const [mpvContextMenuActive, setMpvContextMenuActive] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const previewGridRef = useRef<PreviewGridHandle>(null)
   const previewLoadSeqRef = useRef(0)
@@ -1249,6 +1251,12 @@ export default function App() {
             setContextMenu({ x: e.clientX, y: e.clientY, targetId: item.id })
           }}
           onAddTags={(item) => promptAddTags([item.path])}
+          onMpvContextMenu={(point, item) => {
+            setMpvContextMenuActive(true)
+            setSidebarContextMenu(null)
+            setTagContextMenu(null)
+            setContextMenu({ x: point.x, y: point.y, targetId: item.id })
+          }}
         />
       )}
 
@@ -1257,7 +1265,13 @@ export default function App() {
           x={contextMenu.x}
           y={contextMenu.y}
           items={getContextItems(contextMenu.targetId)}
-          onClose={() => setContextMenu(null)}
+          onClose={() => {
+            setContextMenu(null)
+            if (mpvContextMenuActive) {
+              setMpvContextMenuActive(false)
+              void mpvSetSurfaceVisible(true).catch(() => {})
+            }
+          }}
         />
       )}
 

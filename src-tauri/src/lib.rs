@@ -63,6 +63,8 @@ pub fn run() {
             mpv::mpv_is_available,
             mpv::mpv_attach,
             mpv::mpv_set_bounds,
+            mpv::mpv_set_surface_visible,
+            mpv::mpv_rehook_context_menu,
             mpv::mpv_seek,
             mpv::mpv_set_paused,
             mpv::mpv_set_volume,

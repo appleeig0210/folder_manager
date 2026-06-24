@@ -1,10 +1,11 @@
 import { AnimatePresence, motion } from 'framer-motion'
+import { listen } from '@tauri-apps/api/event'
 import { ChevronLeft, ChevronRight, ExternalLink, Tag, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react'
 import type { MediaItem } from '../../api/types'
 import { api } from '../../api/client'
 import { prepareStreamableVideo, resolveMediaImageSource, resolveMediaPlaybackSource, type MediaPlaybackSource } from '../../lib/mediaPlayback'
-import { isNativeMpvAvailable, mpvDetach, mpvGetDuration, mpvGetTime, mpvSeek, mpvSetMuted, mpvSetPaused, mpvSetVolume } from '../../lib/mpvPlayer'
+import { isNativeMpvAvailable, mpvDetach, mpvGetDuration, mpvGetTime, mpvRehookContextMenu, mpvSeek, mpvSetMuted, mpvSetPaused, mpvSetSurfaceVisible, mpvSetVolume } from '../../lib/mpvPlayer'
 import { getMpvScrubProfile, getVideoScrubProfile, isDesktopApp, shouldProbeNativeMpv, shouldUseCustomVideoScrub, shouldUseServerFrameExtract, supportsNativeMpvEmbed, type VideoScrubProfile } from '../../lib/platform'
 import { getVideoPlaybackModeInfo, playbackModeBadgeClass } from '../../lib/playbackDiagnostics'
 import { isAppModalInteraction, isAppModalOpen } from '../../lib/modal'
@@ -40,9 +41,24 @@ interface MediaLightboxProps {
   onFrameSaved?: (message: string) => void | Promise<void>
   onContextMenu?: (e: React.MouseEvent, item: MediaItem) => void
   onAddTags?: (item: MediaItem) => void
+  onMpvContextMenu?: (point: { x: number; y: number }, item: MediaItem) => void
 }
 
-export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameSaved, onContextMenu, onAddTags }: MediaLightboxProps) {
+type MpvContextMenuPayload = {
+  x: number
+  y: number
+}
+
+export function MediaLightbox({
+  items,
+  initialIndex,
+  onClose,
+  onStatus,
+  onFrameSaved,
+  onContextMenu,
+  onAddTags,
+  onMpvContextMenu,
+}: MediaLightboxProps) {
   const [index, setIndex] = useState(initialIndex)
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState(false)
@@ -284,6 +300,13 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     window.requestAnimationFrame(() => {
       setMpvLayoutRevision((value) => value + 1)
     })
+    // mpv creates its render child window slightly after IPC is ready, so re-install
+    // the right-click hooks a few times to make sure the video surface is covered.
+    for (const delay of [0, 250, 700, 1500]) {
+      window.setTimeout(() => {
+        void mpvRehookContextMenu().catch(() => {})
+      }, delay)
+    }
   }, [])
 
   const handleMpvRetry = useCallback((attempt: number, maxAttempts: number) => {
@@ -904,6 +927,36 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
     if (!playbackModeInfo || item?.media_type !== 'video') return
     console.info(`[播放診斷] ${playbackModeInfo.label} — ${playbackModeInfo.hint}`)
   }, [item?.media_type, playbackModeInfo])
+
+  useEffect(() => {
+    if (!mpvMode || !onMpvContextMenu || item?.media_type !== 'video') return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+
+    void listen<MpvContextMenuPayload>('mpv-context-menu', (event) => {
+      if (disposed || !mpvModeRef.current || !mpvReadyRef.current || !item) return
+      const scale = window.devicePixelRatio || 1
+      void mpvSetSurfaceVisible(false).catch(() => {})
+      onMpvContextMenu(
+        {
+          x: event.payload.x / scale,
+          y: event.payload.y / scale,
+        },
+        item,
+      )
+    }).then((dispose) => {
+      if (disposed) {
+        dispose()
+        return
+      }
+      unlisten = dispose
+    })
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [item, item?.media_type, mpvMode, onMpvContextMenu])
 
   useEffect(() => {
     if (!mpvMode || !mpvReady || scrubbing) return

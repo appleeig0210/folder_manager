@@ -6,7 +6,8 @@ use windows::Win32::Foundation::HWND;
 use crate::mpv::ipc::MpvIpc;
 use crate::mpv::player::{find_mpv_executable, MpvBounds, MpvSession, SendHwnd};
 use crate::mpv::surface::{
-    create_child_surface, destroy_child_surface, enable_click_through, position_child_surface,
+    create_child_surface, destroy_child_surface, enable_click_through, install_descendant_context_menu_hooks,
+    position_child_surface,
 };
 
 pub struct MpvState(pub Mutex<Option<MpvSession>>);
@@ -39,12 +40,21 @@ pub fn take_session(state: &MpvState) -> Option<MpvSession> {
     state.0.lock().ok()?.take()
 }
 
-pub fn create_surface_on_parent(parent: HWND, bounds: &MpvBounds) -> Result<HWND, String> {
+pub fn create_surface_on_parent(parent: HWND, bounds: &MpvBounds, app_handle: tauri::AppHandle) -> Result<HWND, String> {
     unsafe {
-        let hwnd = create_child_surface(parent, bounds)?;
+        let hwnd = create_child_surface(parent, bounds, app_handle)?;
         enable_click_through(hwnd)?;
         Ok(hwnd)
     }
+}
+
+pub fn hook_surface_descendants(hwnd: HWND) -> Result<(), String> {
+    unsafe { install_descendant_context_menu_hooks(hwnd) }
+}
+
+pub fn current_child_hwnd(state: &MpvState) -> Option<HWND> {
+    let guard = state.0.lock().ok()?;
+    guard.as_ref().map(|session| session.child_hwnd.0)
 }
 
 pub fn update_surface_bounds(hwnd: HWND, bounds: &MpvBounds) -> Result<(), String> {
@@ -126,6 +136,17 @@ pub fn set_bounds(state: &MpvState, bounds: MpvBounds) -> Result<HWND, String> {
         .as_mut()
         .ok_or_else(|| "mpv 尚未啟動".to_string())?;
     session.bounds = bounds;
+    Ok(session.child_hwnd.0)
+}
+
+pub fn set_surface_visible(state: &MpvState, _visible: bool) -> Result<HWND, String> {
+    let guard = state
+        .0
+        .lock()
+        .map_err(|_| "mpv state lock poisoned".to_string())?;
+    let session = guard
+        .as_ref()
+        .ok_or_else(|| "mpv 尚未啟動".to_string())?;
     Ok(session.child_hwnd.0)
 }
 

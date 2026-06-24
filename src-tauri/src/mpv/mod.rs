@@ -46,6 +46,18 @@ pub async fn mpv_set_bounds(_x: i32, _y: i32, _width: i32, _height: i32) -> Resu
 
 #[cfg(not(windows))]
 #[tauri::command]
+pub async fn mpv_set_surface_visible(_visible: bool) -> Result<(), InvokeError> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn mpv_rehook_context_menu() -> Result<(), InvokeError> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
 pub async fn mpv_seek(_seconds: f64) -> Result<(), InvokeError> {
     Err("mpv embedding is only supported on Windows".into())
 }

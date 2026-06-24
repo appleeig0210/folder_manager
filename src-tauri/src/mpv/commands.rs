@@ -5,10 +5,10 @@ use windows::Win32::Foundation::HWND;
 
 use crate::mpv::player::MpvBounds;
 use crate::mpv::state::{
-    create_surface_on_parent, destroy_surface, detach_session_fast, detach_session_for_ui,
-    get_duration, get_time, kill_session, resolve_mpv_executable, seek, set_bounds, set_muted,
-    set_paused, set_volume, start_mpv_process, store_session, take_session, update_surface_bounds,
-    MpvState,
+    create_surface_on_parent, current_child_hwnd, destroy_surface, detach_session_fast,
+    detach_session_for_ui, get_duration, get_time, hook_surface_descendants, kill_session,
+    resolve_mpv_executable, seek, set_bounds, set_muted, set_paused, set_surface_visible, set_volume,
+    start_mpv_process, store_session, take_session, update_surface_bounds, MpvState,
 };
 
 fn hwnd_from_isize(raw: isize) -> HWND {
@@ -61,14 +61,17 @@ pub async fn mpv_attach(
             .map_err(|error| format!("取得視窗 handle 失敗：{error}"))?,
     );
     let bounds = MpvBounds { x, y, width, height };
+    let app_handle = window.app_handle().clone();
 
     let child_raw = run_on_ui(&window, move || {
-        create_surface_on_parent(hwnd_from_isize(parent_raw), &bounds).map(hwnd_to_isize)
+        create_surface_on_parent(hwnd_from_isize(parent_raw), &bounds, app_handle).map(hwnd_to_isize)
     })??;
     let child_hwnd = hwnd_from_isize(child_raw);
 
     let pipe_name = format!(r"\\.\pipe\pfm-mpv-{}", std::process::id());
     let (process, ipc) = start_mpv_process(&path, child_hwnd, &pipe_name)?;
+    let hook_child_raw = child_raw;
+    let _ = run_on_ui(&window, move || hook_surface_descendants(hwnd_from_isize(hook_child_raw)));
     store_session(state.inner(), child_hwnd, process, ipc, bounds)
 }
 
@@ -84,6 +87,35 @@ pub async fn mpv_set_bounds(
     let bounds = MpvBounds { x, y, width, height };
     let hwnd_raw = hwnd_to_isize(set_bounds(state.inner(), bounds)?);
     run_on_ui(&window, move || update_surface_bounds(hwnd_from_isize(hwnd_raw), &bounds))??;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mpv_rehook_context_menu(
+    window: WebviewWindow,
+    state: State<'_, MpvState>,
+) -> Result<(), String> {
+    let Some(hwnd) = current_child_hwnd(state.inner()) else {
+        return Ok(());
+    };
+    let hwnd_raw = hwnd_to_isize(hwnd);
+    run_on_ui(&window, move || {
+        let _ = hook_surface_descendants(hwnd_from_isize(hwnd_raw));
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mpv_set_surface_visible(
+    window: WebviewWindow,
+    visible: bool,
+    state: State<'_, MpvState>,
+) -> Result<(), String> {
+    let hwnd_raw = hwnd_to_isize(set_surface_visible(state.inner(), visible)?);
+    run_on_ui(&window, move || {
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
+        let _ = unsafe { ShowWindow(hwnd_from_isize(hwnd_raw), if visible { SW_SHOW } else { SW_HIDE }) };
+    })?;
     Ok(())
 }
 

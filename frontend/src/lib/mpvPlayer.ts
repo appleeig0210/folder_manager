@@ -61,6 +61,14 @@ export async function mpvSetBounds(bounds: MpvBounds): Promise<void> {
   })
 }
 
+export async function mpvSetSurfaceVisible(visible: boolean): Promise<void> {
+  await invoke('mpv_set_surface_visible', { visible })
+}
+
+export async function mpvRehookContextMenu(): Promise<void> {
+  await invoke('mpv_rehook_context_menu')
+}
+
 export async function mpvSeek(seconds: number): Promise<void> {
   await invoke('mpv_seek', { seconds })
 }
