@@ -146,6 +146,11 @@ export const api = {
   invalidateTagCache: () =>
     request<StatusResponse>('/api/tags/invalidate', { method: 'POST' }),
   getTags: () => request<TagListResponse>('/api/tags'),
+  getTagsByPaths: (paths: string[]) =>
+    request<Record<string, string[]>>('/api/tags/by-paths', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
   updateFilter: (state: FilterState) =>
     request<TagListResponse>('/api/tags/filter', {
       method: 'PATCH',

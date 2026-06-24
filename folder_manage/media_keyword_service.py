@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from api.constants import APP_NAME
@@ -40,6 +41,9 @@ class MediaKeywordService:
         self._scan_lock = threading.Lock()
         self._scanning = False
         self._scan_thread: threading.Thread | None = None
+        self._scan_generation = 0
+        self._scan_target_root: Path | None = None
+        self._scan_target_mode = "rebuild"
         self._exiftool_io_lock = threading.Lock()
 
     def close(self) -> None:
@@ -102,12 +106,19 @@ class MediaKeywordService:
             return
         root_key = str(root.resolve())
         stored = self._index.get_meta(self.META_ROOT_KEY)
-        if stored != root_key:
+        root_changed = stored != root_key
+        if root_changed:
             self._index.clear_all()
             self._index.set_meta(self.META_ROOT_KEY, root_key)
             with self._cache_lock:
                 self._cache.clear()
-        if self._index.count() == 0 and not self._scanning:
+        # On an actual root switch we must (re)start a scan immediately, even if a
+        # previous scan is still running for the old root — otherwise the new folder
+        # would never be indexed until an unrelated trigger happened to land while
+        # idle, which manifests as "tags only appear after a long delay".
+        if root_changed:
+            self.schedule_background_rebuild(root, delay_seconds=0)
+        elif self._index.count() == 0 and not self._scanning:
             self.schedule_background_rebuild(root, delay_seconds=4.0)
 
     def invalidate_all(self) -> None:
@@ -636,58 +647,65 @@ class MediaKeywordService:
         self._index.prune_stale_files_under_prefixes(folders)
 
     def schedule_background_rebuild(self, root: Path, *, delay_seconds: float = 0) -> None:
-        root = Path(root).resolve()
-        if not root.is_dir():
-            return
-
-        def worker() -> None:
-            if delay_seconds > 0:
-                import time
-                time.sleep(delay_seconds)
-            with self._scan_lock:
-                if self._scanning:
-                    return
-                self._scanning = True
-            try:
-                media_paths = self.iter_media_files(root)
-                for offset in range(0, len(media_paths), self.REBUILD_BATCH_SIZE):
-                    chunk = media_paths[offset : offset + self.REBUILD_BATCH_SIZE]
-                    _, misses = self._index.get_batch(chunk)
-                    if misses:
-                        self.read_keywords_batch(misses)
-            finally:
-                self._scanning = False
-
-        if self._scan_thread and self._scan_thread.is_alive():
-            return
-        self._scan_thread = threading.Thread(target=worker, name="tag-index-rebuild", daemon=True)
-        self._scan_thread.start()
+        self._schedule_scan(root, mode="rebuild", delay_seconds=delay_seconds)
 
     def schedule_background_resync(self, root: Path, *, delay_seconds: float = 0) -> None:
+        self._schedule_scan(root, mode="resync", delay_seconds=delay_seconds)
+
+    def _schedule_scan(self, root: Path, *, mode: str, delay_seconds: float = 0) -> None:
         root = Path(root).resolve()
         if not root.is_dir():
             return
+        with self._scan_lock:
+            # Bumping the generation makes any in-flight scan abort at its next batch
+            # boundary and adopt the new target instead of fighting over the index.
+            self._scan_generation += 1
+            self._scan_target_root = root
+            self._scan_target_mode = mode
+            if self._scan_thread is not None and self._scan_thread.is_alive():
+                return
+            self._scanning = True
+            self._scan_thread = threading.Thread(
+                target=self._scan_worker,
+                args=(delay_seconds,),
+                name="tag-index-scan",
+                daemon=True,
+            )
+            self._scan_thread.start()
 
-        def worker() -> None:
-            if delay_seconds > 0:
-                import time
-                time.sleep(delay_seconds)
+    def _scan_worker(self, delay_seconds: float) -> None:
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+        while True:
             with self._scan_lock:
-                if self._scanning:
+                generation = self._scan_generation
+                root = self._scan_target_root
+                mode = self._scan_target_mode
+            if root is not None:
+                self._run_scan_pass(root, mode, generation)
+            with self._scan_lock:
+                if generation == self._scan_generation:
+                    # No newer request arrived while we worked; exit cleanly. Clearing
+                    # the thread handle under the same lock avoids a lost-wakeup race
+                    # with a scheduler that is about to start a fresh scan.
+                    self._scanning = False
+                    self._scan_thread = None
                     return
-                self._scanning = True
-            try:
-                media_paths = self.iter_media_files(root)
-                for offset in range(0, len(media_paths), self.REBUILD_BATCH_SIZE):
-                    chunk = media_paths[offset : offset + self.REBUILD_BATCH_SIZE]
-                    self._read_exiftool_batch(chunk)
-            finally:
-                self._scanning = False
+                # A newer target was queued; loop again to pick it up.
 
-        if self._scan_thread and self._scan_thread.is_alive():
-            return
-        self._scan_thread = threading.Thread(target=worker, name="tag-index-resync", daemon=True)
-        self._scan_thread.start()
+    def _run_scan_pass(self, root: Path, mode: str, generation: int) -> None:
+        media_paths = self.iter_media_files(root)
+        for offset in range(0, len(media_paths), self.REBUILD_BATCH_SIZE):
+            with self._scan_lock:
+                if generation != self._scan_generation:
+                    return
+            chunk = media_paths[offset : offset + self.REBUILD_BATCH_SIZE]
+            if mode == "resync":
+                self._read_exiftool_batch(chunk)
+            else:
+                _, misses = self._index.get_batch(chunk)
+                if misses:
+                    self.read_keywords_batch(misses)
 
     def collect_all_tags(self, store: PeopleDataStore) -> list[str]:
         if store.root_folder is None:

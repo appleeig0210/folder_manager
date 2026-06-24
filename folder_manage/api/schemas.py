@@ -110,6 +110,10 @@ class DeleteTagsRequest(BaseModel):
     tags: list[str]
 
 
+class TagsByPathsRequest(BaseModel):
+    paths: list[str]
+
+
 class CreateFolderRequest(BaseModel):
     parent_path: str
     name: str

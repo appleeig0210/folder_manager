@@ -9,7 +9,15 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from api.deps import get_ctx
-from api.schemas import DeleteTagsRequest, FilterState, ImportTagsRequest, SetTagsRequest, StatusResponse, TagListResponse
+from api.schemas import (
+    DeleteTagsRequest,
+    FilterState,
+    ImportTagsRequest,
+    SetTagsRequest,
+    StatusResponse,
+    TagListResponse,
+    TagsByPathsRequest,
+)
 from media_keyword_service import MediaKeywordService
 
 router = APIRouter(prefix="/api/tags", tags=["tags"])
@@ -55,6 +63,28 @@ def list_tags() -> TagListResponse:
     if ctx.store.root_folder is None:
         return TagListResponse(all_tags=[], filter_state=_filter_state(ctx), index_ready=False, scanning=False)
     return _tag_list_response(ctx)
+
+
+@router.post("/by-paths", response_model=dict[str, list[str]])
+def tags_by_paths(body: TagsByPathsRequest) -> dict[str, list[str]]:
+    """Index-only tag lookup for the given media paths (never blocks on ExifTool).
+
+    Used by the UI to progressively fill in card tags while the background tag
+    index is still being built, so the user does not have to hit refresh.
+    """
+    ctx = get_ctx()
+    raw_paths = [p for p in body.paths if (p or "").strip()]
+    if not raw_paths:
+        return {}
+    resolved = ctx.keyword_service.read_keywords_batch(
+        [Path(p) for p in raw_paths],
+        fetch_misses=False,
+    )
+    out: dict[str, list[str]] = {}
+    for raw in raw_paths:
+        key = str(Path(raw).resolve())
+        out[raw] = resolved.get(key, [])
+    return out
 
 
 @router.patch("/filter", response_model=TagListResponse)

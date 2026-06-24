@@ -367,11 +367,41 @@ export default function App() {
 
   const allTagsKeyRef = useRef('')
   const filterKeyRef = useRef('')
+  const displayedMediaRef = useRef<MediaItem[]>([])
+
+  useEffect(() => {
+    displayedMediaRef.current = media
+  }, [media])
 
   useEffect(() => {
     if (initializing || !config.has_root) return
     let cancelled = false
     let timer: number | undefined
+
+    const patchDisplayedTags = async () => {
+      // While the index is building, fill in any still-missing card tags from the
+      // index directly so the user never has to press refresh manually.
+      const pending = displayedMediaRef.current.filter((item) => !item.tags.length).map((item) => item.path)
+      if (!pending.length) return
+      try {
+        const tagMap = await api.getTagsByPaths(pending)
+        if (cancelled) return
+        setMedia((current) => {
+          let changed = false
+          const next = current.map((item) => {
+            const incoming = tagMap[item.path]
+            if (incoming && incoming.length && incoming.length !== item.tags.length) {
+              changed = true
+              return { ...item, tags: incoming }
+            }
+            return item
+          })
+          return changed ? next : current
+        })
+      } catch {
+        // ignore background tag patching errors
+      }
+    }
 
     const pollTagIndex = async () => {
       try {
@@ -387,6 +417,8 @@ export default function App() {
           filterKeyRef.current = nextFilterKey
           setFilter(res.filter_state)
         }
+        await patchDisplayedTags()
+        if (cancelled) return
         if (res.scanning) {
           setStatus((current) => (current.includes('索引建立中') ? current : '標籤索引建立中…'))
           timer = window.setTimeout(pollTagIndex, 2000)
