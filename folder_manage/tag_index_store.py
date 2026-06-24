@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -152,6 +153,20 @@ class TagIndexStore:
         with self._lock:
             self._conn.execute("DELETE FROM media_tags WHERE path = ?", (key,))
             self._conn.commit()
+
+    def delete_junk_paths(self, is_junk: Callable[[str], bool]) -> int:
+        with self._lock:
+            rows = self._conn.execute("SELECT path FROM media_tags").fetchall()
+            junk = [str(row["path"]) for row in rows if is_junk(Path(row["path"]).name)]
+            if not junk:
+                return 0
+            placeholders = ",".join("?" for _ in junk)
+            self._conn.execute(
+                f"DELETE FROM media_tags WHERE path IN ({placeholders})",
+                junk,
+            )
+            self._conn.commit()
+        return len(junk)
 
     def delete_paths(self, paths: list[Path | str]) -> None:
         if not paths:

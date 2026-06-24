@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from media_path_filters import is_junk_filename, is_junk_path
+
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
@@ -150,7 +152,7 @@ class PeopleDataStore:
         except Exception:
             return []
         for path in children:
-            if not path.is_file():
+            if not path.is_file() or is_junk_path(path):
                 continue
             suffix = path.suffix.lower()
             if suffix in IMAGE_EXTENSIONS:
@@ -179,13 +181,19 @@ class PeopleDataStore:
         items: list[MediaItem] = []
         for root, _, files in os.walk(folder):
             root_path = Path(root)
-            for file_name in sorted(files):
+            dir_items: list[MediaItem] = []
+            for file_name in files:
+                if is_junk_filename(file_name):
+                    continue
+                suffix = Path(file_name).suffix.lower()
                 path = root_path / file_name
-                suffix = path.suffix.lower()
                 if suffix in IMAGE_EXTENSIONS:
-                    items.append(MediaItem(media_path=path, media_type="image"))
+                    dir_items.append(MediaItem(media_path=path, media_type="image"))
                 elif suffix in VIDEO_EXTENSIONS:
-                    items.append(MediaItem(media_path=path, media_type="video"))
+                    dir_items.append(MediaItem(media_path=path, media_type="video"))
+            if dir_items:
+                dir_items.sort(key=lambda m: m.media_path.name.lower())
+                items.extend(dir_items)
         return items
 
     def _scan_media_info_from_items(self, items: list[MediaItem]) -> tuple[Optional[Path], Optional[str], int]:
@@ -214,7 +222,7 @@ class PeopleDataStore:
         except Exception:
             folder_mtime = 0
         try:
-            child_count = sum(1 for _ in folder.iterdir())
+            child_count = sum(1 for child in folder.iterdir() if not is_junk_path(child))
         except Exception:
             child_count = 0
         return folder_mtime, child_count

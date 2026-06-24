@@ -37,10 +37,17 @@ def _entry_to_item(entry: SubfolderEntry, store) -> EntryItem:
     )
 
 
-def _media_to_item(ctx, media_path: Path, media_type: str, tags: list[str]) -> MediaItemResponse:
+def _media_to_item(
+    ctx,
+    media_path: Path,
+    media_type: str,
+    tags: list[str],
+    *,
+    include_duration: bool = False,
+) -> MediaItemResponse:
     duration = None
     duration_label = None
-    if media_type == "video":
+    if include_duration and media_type == "video":
         duration = ctx.thumbnail_service.get_video_duration_seconds(media_path)
         if duration is not None:
             duration_label = ThumbnailService.format_video_duration(duration)

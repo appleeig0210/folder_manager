@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from api.services.preview_service import PreviewService
+from media_path_filters import is_junk_path
 from people_data_store import PeopleDataStore, SubfolderEntry
 
 
@@ -232,7 +233,7 @@ class TreeService:
             )
             for path_str in matching_paths:
                 path = Path(path_str)
-                if not path.is_file():
+                if not path.is_file() or is_junk_path(path):
                     continue
                 try:
                     folder = path.parent

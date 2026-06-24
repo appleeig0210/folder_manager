@@ -13,6 +13,7 @@ from pathlib import Path
 from api.constants import APP_NAME
 from app_paths import get_app_data_dir
 from exiftool_session import ExifToolSession, exiftool_cli_path, run_exiftool_subprocess
+from media_path_filters import is_junk_filename, is_junk_path
 from people_data_store import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, MediaItem, PeopleDataStore
 from tag_index_store import TagIndexStore
 
@@ -112,6 +113,8 @@ class MediaKeywordService:
             self._index.set_meta(self.META_ROOT_KEY, root_key)
             with self._cache_lock:
                 self._cache.clear()
+        else:
+            self._prune_junk_index_entries()
         # On an actual root switch we must (re)start a scan immediately, even if a
         # previous scan is still running for the old root — otherwise the new folder
         # would never be indexed until an unrelated trigger happened to land while
@@ -501,7 +504,7 @@ class MediaKeywordService:
         for raw in paths:
             path = Path(raw).resolve()
             key = str(path)
-            if not path.is_file():
+            if not path.is_file() or is_junk_path(path):
                 output[key] = []
                 continue
             if path.suffix.lower() not in self.MEDIA_EXTENSIONS:
@@ -607,9 +610,10 @@ class MediaKeywordService:
         for dirpath, _, filenames in os.walk(root):
             dir_path = Path(dirpath)
             for name in filenames:
-                path = dir_path / name
-                if path.suffix.lower() in self.MEDIA_EXTENSIONS:
-                    files.append(path)
+                if is_junk_filename(name):
+                    continue
+                if Path(name).suffix.lower() in self.MEDIA_EXTENSIONS:
+                    files.append(dir_path / name)
         return files
 
     def list_media_files_in_scope(self, folders: list[Path]) -> list[Path]:
@@ -694,6 +698,7 @@ class MediaKeywordService:
                 # A newer target was queued; loop again to pick it up.
 
     def _run_scan_pass(self, root: Path, mode: str, generation: int) -> None:
+        self._prune_junk_index_entries()
         media_paths = self.iter_media_files(root)
         for offset in range(0, len(media_paths), self.REBUILD_BATCH_SIZE):
             with self._scan_lock:
@@ -718,8 +723,19 @@ class MediaKeywordService:
         return [
             Path(path)
             for path in self._index.paths_having_any_tag(tags)
-            if Path(path).is_file() and Path(path).suffix.lower() in self.MEDIA_EXTENSIONS
+            if Path(path).is_file()
+            and not is_junk_path(Path(path))
+            and Path(path).suffix.lower() in self.MEDIA_EXTENSIONS
         ]
+
+    def _prune_junk_index_entries(self) -> int:
+        removed = self._index.delete_junk_paths(is_junk_filename)
+        if removed:
+            with self._cache_lock:
+                stale = [key for key in self._cache if is_junk_path(Path(key))]
+                for key in stale:
+                    self._cache.pop(key, None)
+        return removed
 
     def _scan_disk_for_tags(self, root: Path, tags: list[str]) -> list[Path]:
         tokens = {(tag or "").strip().casefold() for tag in tags if (tag or "").strip()}
@@ -771,7 +787,7 @@ class MediaKeywordService:
         exported: dict[str, list[str]] = {}
         for path_str in self._index.paths_under_prefix(root):
             path = Path(path_str)
-            if not path.is_file():
+            if not path.is_file() or is_junk_path(path):
                 continue
             tags = self.get_keywords(path)
             if tags:
@@ -808,7 +824,8 @@ class MediaKeywordService:
         *,
         under_prefix: Path | None = None,
     ) -> set[str]:
-        return self._index.paths_with_any_tag(selected_tags, under_prefix=under_prefix)
+        paths = self._index.paths_with_any_tag(selected_tags, under_prefix=under_prefix)
+        return {path for path in paths if not is_junk_path(Path(path))}
 
     def folder_has_tagged_media_from_index(
         self,
