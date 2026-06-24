@@ -39,6 +39,7 @@ interface PreviewGridProps {
   media: MediaItem[]
   selectedIds: Set<string>
   loading?: boolean
+  loadingPhase?: 'fetch' | 'render'
   initializing?: boolean
   thumbnailVersion?: number
   sortable?: boolean
@@ -81,6 +82,7 @@ export const PreviewGrid = forwardRef<PreviewGridHandle, PreviewGridProps>(funct
   media,
   selectedIds,
   loading = false,
+  loadingPhase = 'fetch',
   initializing = false,
   thumbnailVersion,
   onSelect,
@@ -349,7 +351,7 @@ export const PreviewGrid = forwardRef<PreviewGridHandle, PreviewGridProps>(funct
   }
 
   if (loading && !initializing) {
-    return <PreviewLoadingState />
+    return <PreviewLoadingState phase={loadingPhase} />
   }
 
   if (!gridCells.length) {

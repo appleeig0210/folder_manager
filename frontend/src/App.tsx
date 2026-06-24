@@ -1,4 +1,4 @@
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react'
 import { api } from './api/client'
 import type {
   BreadcrumbItem,
@@ -187,6 +187,7 @@ export default function App() {
   const [sidebarPrunePaths, setSidebarPrunePaths] = useState<string[]>([])
   const [treeRevision, setTreeRevision] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [isPreviewPending, startPreviewTransition] = useTransition()
   const [initializing, setInitializing] = useState(true)
   const [deletingTags, setDeletingTags] = useState<Set<string>>(() => new Set())
   const [thumbnailVersion, setThumbnailVersion] = useState(0)
@@ -263,7 +264,7 @@ export default function App() {
       setScopeLabel(res.scope_label)
       setScopePath(res.scope_path)
       setBreadcrumb(res.breadcrumb)
-      startTransition(() => {
+      startPreviewTransition(() => {
         setEntries(res.entries)
         setMedia(res.media)
         setSelectedIds(new Set())
@@ -307,7 +308,7 @@ export default function App() {
       setScopeLabel(res.scope_label)
       setScopePath(res.scope_path)
       setBreadcrumb(res.breadcrumb)
-      startTransition(() => {
+      startPreviewTransition(() => {
         setMedia(res.items)
         setEntries([])
         setSelectedIds(new Set())
@@ -1154,7 +1155,8 @@ export default function App() {
           entries={entries}
           media={media}
           selectedIds={selectedIds}
-          loading={loading}
+          loading={loading || isPreviewPending}
+          loadingPhase={isPreviewPending && !loading ? 'render' : 'fetch'}
           initializing={initializing}
           thumbnailVersion={thumbnailVersion}
           sortable
@@ -1246,6 +1248,7 @@ export default function App() {
             setTagContextMenu(null)
             setContextMenu({ x: e.clientX, y: e.clientY, targetId: item.id })
           }}
+          onAddTags={(item) => promptAddTags([item.path])}
         />
       )}
 

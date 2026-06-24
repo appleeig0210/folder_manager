@@ -39,9 +39,10 @@ interface MediaLightboxProps {
   onStatus?: (message: string) => void
   onFrameSaved?: (message: string) => void | Promise<void>
   onContextMenu?: (e: React.MouseEvent, item: MediaItem) => void
+  onAddTags?: (item: MediaItem) => void
 }
 
-export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameSaved, onContextMenu }: MediaLightboxProps) {
+export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameSaved, onContextMenu, onAddTags }: MediaLightboxProps) {
   const [index, setIndex] = useState(initialIndex)
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState(false)
@@ -1056,9 +1057,26 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
           className="relative z-30 flex items-center justify-between px-4 py-3 text-white"
           onContextMenu={handlePreviewContextMenu}
         >
-          <div className="min-w-0">
-            <p className="text-sm font-semibold truncate">{item.name}</p>
-            <p className="text-xs text-white/60">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+              {item.tags.length > 0 ? (
+                item.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex max-w-[12rem] truncate px-2.5 py-0.5 rounded-[var(--radius-pill)] text-xs font-medium border bg-[var(--color-panel-2)] text-[var(--color-text-muted)] border-[var(--color-border)]"
+                    title={tag}
+                  >
+                    {tag}
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-white/45 shrink-0">（尚未標籤）</span>
+              )}
+            </div>
+          </div>
+          <div className="pointer-events-none absolute left-1/2 top-1/2 z-0 flex max-w-[40%] -translate-x-1/2 -translate-y-1/2 flex-col items-center text-center">
+            <p className="text-sm font-semibold truncate max-w-full">{item.name}</p>
+            <p className="text-xs text-white/60 mt-0.5">
               {resolvedIndex + 1} / {items.length} · {item.media_type === 'video' ? '影片' : '圖片'}
               {item.duration_label ? ` · ${item.duration_label}` : ''}
               {playbackModeInfo ? (
@@ -1072,7 +1090,16 @@ export function MediaLightbox({ items, initialIndex, onClose, onStatus, onFrameS
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {onContextMenu ? (
+            {onAddTags ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-white hover:bg-white/10"
+                onClick={() => onAddTags(item)}
+              >
+                <Tag className="w-4 h-4" /> 標籤
+              </Button>
+            ) : onContextMenu ? (
               <Button
                 size="sm"
                 variant="ghost"
