@@ -34,7 +34,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   return (
     <div
       ref={ref}
-      className="fixed z-[60] min-w-[200px] py-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel)] shadow-[var(--shadow-md)]"
+      className="fixed z-[60] w-max min-w-[140px] max-w-[min(90vw,320px)] py-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-panel)] shadow-[var(--shadow-md)]"
       style={{ left: x, top: y }}
     >
       {items.map((item, i) =>
@@ -49,7 +49,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
               window.setTimeout(item.onClick, 0)
             }}
             className={cn(
-              'w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-panel-2)] transition-colors',
+              'block w-full whitespace-nowrap text-left px-3 py-2 text-sm hover:bg-[var(--color-panel-2)] transition-colors',
               item.danger ? 'text-[var(--color-danger)]' : 'text-[var(--color-text)]',
             )}
           >

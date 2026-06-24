@@ -1,6 +1,6 @@
 import type { EntryItem } from '../../api/types'
 import { cn } from '../../lib/utils'
-import { useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { GripVertical } from 'lucide-react'
 import { EntryFanPreview } from './EntryFanPreview'
 
@@ -11,8 +11,10 @@ interface EntryCardProps {
   sortable?: boolean
   dragging?: boolean
   dropPosition?: 'before' | 'after' | null
+  hoverSyncToken?: number
+  getPointer?: () => { x: number; y: number; active: boolean }
   onSelect: (e: React.MouseEvent) => void
-  onDoubleClick: () => void
+  onDoubleClick: (e: React.MouseEvent) => void
   onContextMenu: (e: React.MouseEvent) => void
   onDragStart?: (e: React.DragEvent<HTMLElement>) => void
   onDragOverItem?: (e: React.DragEvent<HTMLDivElement>) => void
@@ -27,6 +29,8 @@ export function EntryCard({
   sortable,
   dragging,
   dropPosition,
+  hoverSyncToken = 0,
+  getPointer,
   onSelect,
   onDoubleClick,
   onContextMenu,
@@ -37,8 +41,31 @@ export function EntryCard({
 }: EntryCardProps) {
   const [hovered, setHovered] = useState(false)
   const clickTimerRef = useRef<number | null>(null)
+  const cardRef = useRef<HTMLDivElement>(null)
   const fanSamples = item.preview_samples ?? []
   const hasFan = fanSamples.length >= 2
+
+  useLayoutEffect(() => {
+    if (!hoverSyncToken) return
+    if (!hasFan || !getPointer) return
+    const { x, y, active } = getPointer()
+    if (!active) return
+    const el = cardRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const inside =
+      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+    if (!inside) {
+      setHovered(false)
+      return
+    }
+    setHovered(false)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setHovered(true)
+      })
+    })
+  }, [getPointer, hasFan, hoverSyncToken])
 
   const startInternalDrag = (e: React.DragEvent<HTMLElement>) => {
     if (!sortable) {
@@ -53,6 +80,7 @@ export function EntryCard({
 
   return (
     <div
+      ref={cardRef}
       role="button"
       tabIndex={0}
       onMouseEnter={() => setHovered(true)}
@@ -76,12 +104,12 @@ export function EntryCard({
           onSelect(e)
         }, 220)
       }}
-      onDoubleClick={() => {
+      onDoubleClick={(e) => {
         if (clickTimerRef.current !== null) {
           window.clearTimeout(clickTimerRef.current)
           clickTimerRef.current = null
         }
-        onDoubleClick()
+        onDoubleClick(e)
       }}
       onContextMenu={onContextMenu}
       className={cn(

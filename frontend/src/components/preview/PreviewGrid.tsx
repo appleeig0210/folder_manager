@@ -97,11 +97,31 @@ export const PreviewGrid = forwardRef<PreviewGridHandle, PreviewGridProps>(funct
   const parentRef = useRef<HTMLDivElement>(null)
   const autoScrollFrameRef = useRef<number | null>(null)
   const dragClientYRef = useRef<number | null>(null)
+  const pointerRef = useRef({ x: 0, y: 0, active: false })
+  const prevLoadingRef = useRef(loading)
+  const [hoverSyncToken, setHoverSyncToken] = useState(0)
+  const getPointer = useCallback(() => pointerRef.current, [])
   const gridCells = useMemo(() => buildGridCells(viewMode, entries, media), [viewMode, entries, media])
   const rowHeight = viewMode === 'media' ? MEDIA_HEIGHT : ENTRY_HEIGHT
   const isDraggingSelectedGroup = dragId !== null && selectedIds.has(dragId) && selectedIds.size > 1
   const nativeFileDragEnabled = supportsNativeFileDrag()
   const listSignature = useMemo(() => gridCells.map((cell) => cell.item.id).join('\0'), [gridCells])
+
+  useLayoutEffect(() => {
+    const onMove = (event: MouseEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY, active: true }
+    }
+    window.addEventListener('mousemove', onMove, { passive: true })
+    return () => window.removeEventListener('mousemove', onMove)
+  }, [])
+
+  useEffect(() => {
+    const wasLoading = prevLoadingRef.current
+    prevLoadingRef.current = loading
+    if (wasLoading && !loading && viewMode === 'folder' && entries.length > 0) {
+      setHoverSyncToken((value) => value + 1)
+    }
+  }, [entries.length, loading, viewMode])
 
   useLayoutEffect(() => {
     const parent = parentRef.current
@@ -405,8 +425,17 @@ export const PreviewGrid = forwardRef<PreviewGridHandle, PreviewGridProps>(funct
                       }}
                       onDrop={(e) => commitDrop(e, entry.id)}
                       onSelect={(e) => onSelect(entry.id, e, idx)}
-                      onDoubleClick={() => onDoubleClickEntry(entry)}
+                      onDoubleClick={(e) => {
+                        pointerRef.current = {
+                          x: e.clientX,
+                          y: e.clientY,
+                          active: true,
+                        }
+                        onDoubleClickEntry(entry)
+                      }}
                       onContextMenu={(e) => onContextMenu(e, entry.id)}
+                      hoverSyncToken={hoverSyncToken}
+                      getPointer={getPointer}
                     />
                   )
                 }
