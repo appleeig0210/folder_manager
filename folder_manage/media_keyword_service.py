@@ -11,7 +11,7 @@ from pathlib import Path
 
 from api.constants import APP_NAME
 from app_paths import get_app_data_dir
-from exiftool_session import ExifToolSession, run_exiftool_subprocess
+from exiftool_session import ExifToolSession, exiftool_cli_path, run_exiftool_subprocess
 from people_data_store import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, MediaItem, PeopleDataStore
 from tag_index_store import TagIndexStore
 
@@ -40,6 +40,7 @@ class MediaKeywordService:
         self._scan_lock = threading.Lock()
         self._scanning = False
         self._scan_thread: threading.Thread | None = None
+        self._exiftool_io_lock = threading.Lock()
 
     def close(self) -> None:
         if self._session is not None:
@@ -107,15 +108,14 @@ class MediaKeywordService:
             with self._cache_lock:
                 self._cache.clear()
         if self._index.count() == 0 and not self._scanning:
-            self.schedule_background_rebuild(root)
+            self.schedule_background_rebuild(root, delay_seconds=4.0)
 
     def invalidate_all(self) -> None:
         with self._cache_lock:
             self._cache.clear()
-        self._index.clear_all()
         root_meta = self._index.get_meta(self.META_ROOT_KEY)
         if root_meta:
-            self.schedule_background_rebuild(Path(root_meta))
+            self.schedule_background_resync(Path(root_meta))
 
     def invalidate_path(self, path: Path) -> None:
         key = str(Path(path).resolve())
@@ -284,7 +284,7 @@ class MediaKeywordService:
         fd, name = tempfile.mkstemp(prefix="media_paths_", suffix=".txt")
         os.close(fd)
         argfile = Path(name)
-        lines = "\n".join(str(path.resolve()) for path in paths)
+        lines = "\n".join(exiftool_cli_path(path.resolve()) for path in paths)
         argfile.write_text(f"{lines}\n", encoding="utf-8")
         return argfile
 
@@ -379,29 +379,23 @@ class MediaKeywordService:
             return {}
         output: dict[str, list[str]] = {}
         try:
-            session = self._get_session()
-            payload = session.read_json_batch(
-                paths,
-                self.READ_FIELDS,
-                timeout=max(30, len(paths) * 2),
-            )
-        except Exception:
-            try:
-                exiftool = self.resolve_exiftool()
-            except FileNotFoundError:
-                return {str(path.resolve()): [] for path in paths}
-            args = ["-json", "-s", "-s", "-s"]
-            for field in self.READ_FIELDS:
-                args.append(f"-{field}")
+            exiftool = self.resolve_exiftool()
+        except FileNotFoundError:
+            return {str(path.resolve()): [] for path in paths}
+
+        args = ["-json", "-s", "-s", "-s"]
+        for field in self.READ_FIELDS:
+            args.append(f"-{field}")
+        with self._exiftool_io_lock:
             proc = self._run_exiftool_for_paths(args, paths, timeout=max(30, len(paths) * 2))
-            if proc.returncode not in (0, 1):
-                return {str(path.resolve()): [] for path in paths}
-            try:
-                payload = json.loads(proc.stdout or "[]")
-            except json.JSONDecodeError:
-                payload = []
-            if not isinstance(payload, list):
-                payload = []
+        if proc.returncode not in (0, 1):
+            return {str(path.resolve()): [] for path in paths}
+        try:
+            payload = json.loads(proc.stdout or "[]")
+        except json.JSONDecodeError:
+            payload = []
+        if not isinstance(payload, list):
+            payload = []
 
         indexed = self._index_exiftool_items(payload, paths)
         for path in paths:
@@ -414,6 +408,7 @@ class MediaKeywordService:
 
     def _build_write_payload(self, file_path: Path, tags: list[str]) -> dict[str, object]:
         payload: dict[str, object] = {
+            "SourceFile": str(file_path.resolve()),
             "XMP-dc:Subject": list(tags) if tags else [],
             "IPTC:Keywords": "",
             "Keys:Keywords": "",
@@ -435,25 +430,49 @@ class MediaKeywordService:
             payload["XPKeywords"] = joined
         return payload
 
+    def _write_keyword_args(self, file_path: Path, tags: list[str]) -> list[str]:
+        clean = self._normalize_tags(tags)
+        args = [
+            "-overwrite_original",
+            "-XMP-dc:Subject=",
+            "-IPTC:Keywords=",
+            "-Keywords=",
+            "-XPKeywords=",
+            "-IFD0:XPKeywords=",
+            "-Keys:Keywords=",
+            "-Quicktime:Keywords=",
+            "-XMP-pdf:Keywords=",
+        ]
+        for tag in clean:
+            args.append(f"-XMP-dc:Subject={tag}")
+        if not clean:
+            return args
+
+        joined = "; ".join(clean)
+        args.append(f"-IPTC:Keywords={joined}")
+        args.append(f"-Keywords={joined}")
+        suffix = file_path.suffix.lower()
+        if suffix in VIDEO_EXTENSIONS:
+            args.append(f"-Keys:Keywords={joined}")
+            args.append(f"-Quicktime:Keywords={joined}")
+        if suffix in {".jpg", ".jpeg", ".tif", ".tiff"}:
+            args.append(f"-IFD0:XPKeywords={joined}")
+            args.append(f"-XPKeywords={joined}")
+        return args
+
     def _write_keywords_with_exiftool(self, exiftool: Path, file_path: Path, tags: list[str]) -> subprocess.CompletedProcess[str]:
-        payload = self._build_write_payload(file_path, tags)
-        tmp_json = Path(tempfile.gettempdir()) / f"media_tags_{os.getpid()}_{threading.get_ident()}.json"
-        try:
-            tmp_json.write_text(json.dumps([payload], ensure_ascii=False), encoding="utf-8")
-            try:
-                session = self._get_session()
-                rc, stdout, stderr = session.write_json_batch(file_path, tmp_json, timeout=120)
-                return subprocess.CompletedProcess([str(exiftool)], rc, stdout, stderr)
-            except Exception:
-                args = [
-                    str(exiftool),
-                    "-overwrite_original",
-                    *self._exiftool_charset_args(),
-                    f"-j={tmp_json}",
-                ]
-                return self._run_exiftool_for_paths(args, [file_path], timeout=120)
-        finally:
-            tmp_json.unlink(missing_ok=True)
+        resolved_path = Path(file_path).resolve()
+        if not resolved_path.is_file():
+            return subprocess.CompletedProcess([], 1, "", f"File not found: {exiftool_cli_path(resolved_path)}")
+        args = self._write_keyword_args(resolved_path, tags)
+        with self._exiftool_io_lock:
+            return run_exiftool_subprocess(
+                exiftool,
+                args,
+                [resolved_path],
+                charset_args=self._exiftool_charset_args(),
+                timeout=120,
+            )
 
     def get_keywords(self, path: Path) -> list[str]:
         file_path = Path(path).resolve()
@@ -465,7 +484,7 @@ class MediaKeywordService:
         result = self.read_keywords_batch([file_path])
         return list(result.get(str(file_path), []))
 
-    def read_keywords_batch(self, paths: list[Path]) -> dict[str, list[str]]:
+    def read_keywords_batch(self, paths: list[Path], *, fetch_misses: bool = True) -> dict[str, list[str]]:
         candidates: list[Path] = []
         output: dict[str, list[str]] = {}
         for raw in paths:
@@ -498,6 +517,11 @@ class MediaKeywordService:
         if not index_misses:
             return output
 
+        if not fetch_misses:
+            for path in index_misses:
+                output[str(path.resolve())] = []
+            return output
+
         try:
             self.resolve_exiftool()
         except FileNotFoundError:
@@ -510,6 +534,13 @@ class MediaKeywordService:
             output.update(self._read_exiftool_batch(chunk))
         return output
 
+    @staticmethod
+    def _exiftool_write_succeeded(proc: subprocess.CompletedProcess[str]) -> bool:
+        if proc.returncode == 0:
+            return True
+        combined = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+        return proc.returncode == 1 and "files updated" in combined
+
     def set_keywords(self, path: Path, tags: list[str]) -> list[str]:
         file_path = Path(path).resolve()
         if not file_path.is_file():
@@ -521,13 +552,12 @@ class MediaKeywordService:
         exiftool = self.resolve_exiftool()
         proc = self._write_keywords_with_exiftool(exiftool, file_path, clean)
 
-        if proc.returncode != 0:
+        if not self._exiftool_write_succeeded(proc):
             detail = (proc.stderr or proc.stdout or "").strip()
             raise RuntimeError(detail or "ExifTool 寫入失敗")
 
-        persisted = clean
-        self._cache_set(file_path, persisted)
-        return persisted
+        self._cache_set(file_path, clean)
+        return clean
 
     def add_keywords(self, path: Path, tags: list[str]) -> list[str]:
         current = self.get_keywords(path)
@@ -586,22 +616,33 @@ class MediaKeywordService:
                 files.append(path)
         return files
 
-    def reconcile_scope(self, folders: list[Path]) -> None:
+    def reconcile_scope(
+        self,
+        folders: list[Path],
+        *,
+        scan_new_files: bool = False,
+        scan_limit: int = 80,
+    ) -> None:
         if not folders:
             return
         disk_files = self.list_media_files_in_scope(folders)
         disk_set = {str(path.resolve()) for path in disk_files}
         self._index.prune_orphans_under_prefixes(folders, disk_set)
-        indexed_hits, misses = self._index.get_batch(disk_files)
+        if not scan_new_files:
+            return
+        _, misses = self._index.get_batch(disk_files)
         if misses:
-            self.read_keywords_batch(misses)
+            self.read_keywords_batch(misses[:scan_limit])
 
-    def schedule_background_rebuild(self, root: Path) -> None:
+    def schedule_background_rebuild(self, root: Path, *, delay_seconds: float = 0) -> None:
         root = Path(root).resolve()
         if not root.is_dir():
             return
 
         def worker() -> None:
+            if delay_seconds > 0:
+                import time
+                time.sleep(delay_seconds)
             with self._scan_lock:
                 if self._scanning:
                     return
@@ -621,64 +662,89 @@ class MediaKeywordService:
         self._scan_thread = threading.Thread(target=worker, name="tag-index-rebuild", daemon=True)
         self._scan_thread.start()
 
+    def schedule_background_resync(self, root: Path, *, delay_seconds: float = 0) -> None:
+        root = Path(root).resolve()
+        if not root.is_dir():
+            return
+
+        def worker() -> None:
+            if delay_seconds > 0:
+                import time
+                time.sleep(delay_seconds)
+            with self._scan_lock:
+                if self._scanning:
+                    return
+                self._scanning = True
+            try:
+                media_paths = self.iter_media_files(root)
+                for offset in range(0, len(media_paths), self.REBUILD_BATCH_SIZE):
+                    chunk = media_paths[offset : offset + self.REBUILD_BATCH_SIZE]
+                    self._read_exiftool_batch(chunk)
+            finally:
+                self._scanning = False
+
+        if self._scan_thread and self._scan_thread.is_alive():
+            return
+        self._scan_thread = threading.Thread(target=worker, name="tag-index-resync", daemon=True)
+        self._scan_thread.start()
+
     def collect_all_tags(self, store: PeopleDataStore) -> list[str]:
         if store.root_folder is None:
             return []
         root = store.ensure_root_folder()
         self.bind_root_folder(root)
-        tags = self._index.get_all_unique_tags()
-        if tags:
-            return tags
-        media_paths = self.iter_media_files(root)
-        if not media_paths:
-            return []
-        self.read_keywords_batch(media_paths)
         return self._index.get_all_unique_tags()
 
-    def remove_tag_everywhere(self, store: PeopleDataStore, tag: str) -> int:
-        token = (tag or "").strip().casefold()
-        if not token:
-            return 0
-        paths = [
-            Path(path)
-            for path in self._index.paths_having_any_tag([tag])
-            if Path(path).is_file()
-        ]
-        updated = 0
-        for path in paths:
-            current = self.get_keywords(path)
-            new_tags = [t for t in current if t.casefold() != token]
-            if len(new_tags) == len(current):
-                continue
-            self.set_keywords(path, new_tags)
-            updated += 1
-        return updated
-
-    def remove_tags_everywhere(self, store: PeopleDataStore, tags: list[str]) -> int:
-        tokens = {(tag or "").strip().casefold() for tag in tags if (tag or "").strip()}
-        if not tokens:
-            return 0
-        paths = [
+    def _paths_having_tags(self, tags: list[str]) -> list[Path]:
+        return [
             Path(path)
             for path in self._index.paths_having_any_tag(tags)
-            if Path(path).is_file()
+            if Path(path).is_file() and Path(path).suffix.lower() in self.MEDIA_EXTENSIONS
         ]
-        if not paths and store.root_folder is not None:
-            self.read_keywords_batch(self.iter_media_files(store.ensure_root_folder()))
-            paths = [
-                Path(path)
-                for path in self._index.paths_having_any_tag(tags)
-                if Path(path).is_file()
-            ]
+
+    def _scan_disk_for_tags(self, root: Path, tags: list[str]) -> list[Path]:
+        tokens = {(tag or "").strip().casefold() for tag in tags if (tag or "").strip()}
+        if not tokens:
+            return []
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for path in self.iter_media_files(root):
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            current = self.get_keywords(path)
+            if any(t.casefold() in tokens for t in current):
+                seen.add(key)
+                paths.append(path)
+        return paths
+
+    def _collect_paths_with_tags(self, store: PeopleDataStore, tags: list[str]) -> list[Path]:
+        paths = self._paths_having_tags(tags)
+        if paths or store.root_folder is None:
+            return paths
+        return self._scan_disk_for_tags(store.ensure_root_folder(), tags)
+
+    def remove_tag_everywhere(self, store: PeopleDataStore, tag: str) -> tuple[int, list[str]]:
+        return self.remove_tags_everywhere(store, [tag])
+
+    def remove_tags_everywhere(self, store: PeopleDataStore, tags: list[str]) -> tuple[int, list[str]]:
+        tokens = {(tag or "").strip().casefold() for tag in tags if (tag or "").strip()}
+        if not tokens:
+            return 0, []
+        paths = self._collect_paths_with_tags(store, tags)
         updated = 0
+        warnings: list[str] = []
         for path in paths:
             current = self.get_keywords(path)
             new_tags = [t for t in current if t.casefold() not in tokens]
             if len(new_tags) == len(current):
                 continue
-            self.set_keywords(path, new_tags)
-            updated += 1
-        return updated
+            try:
+                self.set_keywords(path, new_tags)
+                updated += 1
+            except Exception as exc:
+                warnings.append(f"{path.name}: {exc}")
+        return updated, warnings
 
     def export_map(self, store: PeopleDataStore) -> dict[str, list[str]]:
         root = store.ensure_root_folder()

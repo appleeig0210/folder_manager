@@ -97,6 +97,8 @@ class TagListResponse(BaseModel):
     filter_state: FilterState
     index_ready: bool = True
     scanning: bool = False
+    message: Optional[str] = None
+    warnings: Optional[list[str]] = None
 
 
 class SetTagsRequest(BaseModel):

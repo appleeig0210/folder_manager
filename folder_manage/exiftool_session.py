@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
 import tempfile
 from pathlib import Path
+
+
+def exiftool_cli_path(path: Path | str) -> str:
+    """ExifTool on Windows mishandles backslashes in some argument forms (e.g. -j=)."""
+    return os.fspath(path).replace("\\", "/")
 
 
 class ExifToolSession:
@@ -56,7 +62,7 @@ class ExifToolSession:
             args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -124,7 +130,7 @@ class ExifToolSession:
         fd, name = tempfile.mkstemp(prefix="media_paths_", suffix=".txt")
         os.close(fd)
         argfile = Path(name)
-        lines = "\n".join(str(path.resolve()) for path in paths)
+        lines = "\n".join(exiftool_cli_path(path.resolve()) for path in paths)
         argfile.write_text(f"{lines}\n", encoding="utf-8")
         return argfile
 
@@ -145,9 +151,9 @@ def run_exiftool_subprocess(
     os.close(fd)
     argfile = Path(name)
     try:
-        lines = "\n".join(str(path.resolve()) for path in paths)
+        lines = "\n".join(exiftool_cli_path(path.resolve()) for path in paths)
         argfile.write_text(f"{lines}\n", encoding="utf-8")
-        full_args = [str(exiftool_path), *args, *charset_args, "-@", str(argfile)]
+        full_args = [str(exiftool_path), *args, *charset_args, "-@", exiftool_cli_path(argfile)]
         return subprocess.run(
             full_args,
             capture_output=True,

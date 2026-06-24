@@ -47,6 +47,21 @@ function normalizeId(id: string): string {
   return id.replaceAll('\\', '/').toLocaleLowerCase()
 }
 
+function formatPreviewLoadStatus(entries: EntryItem[], mediaCount: number): string {
+  const nestedMedia = entries.reduce((sum, entry) => sum + (entry.media_count ?? 0), 0)
+  const entryPart = `${entries.length} 個資料夾`
+  if (entries.length === 0) {
+    return `已載入 ${mediaCount} 個媒體`
+  }
+  if (mediaCount === 0 && nestedMedia > 0) {
+    return `已載入 ${entryPart}（子資料夾含 ${nestedMedia} 個媒體，雙擊進入查看）`
+  }
+  if (nestedMedia > mediaCount) {
+    return `已載入 ${entryPart}、${mediaCount} 個直接媒體（子資料夾另含 ${nestedMedia} 個）`
+  }
+  return `已載入 ${entryPart}、${mediaCount} 個媒體`
+}
+
 function replacePathSegment(path: string, _oldSegment: string, newSegment: string): string {
   const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   if (separatorIndex < 0) return newSegment
@@ -157,6 +172,7 @@ export default function App() {
   const [thumbnailVersion, setThumbnailVersion] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const previewGridRef = useRef<PreviewGridHandle>(null)
+  const previewLoadSeqRef = useRef(0)
 
   useEffect(() => {
     if (!sidebarPrunePaths.length) return
@@ -193,8 +209,10 @@ export default function App() {
     pathOrPaths: string | string[],
     options?: { clearPreview?: boolean },
   ) => {
+    const seq = ++previewLoadSeqRef.current
     setLoading(true)
     setViewMode('folder')
+    setStatus('正在載入預覽…')
     if (options?.clearPreview) {
       setEntries([])
       setMedia([])
@@ -202,6 +220,7 @@ export default function App() {
     }
     try {
       const res = await api.getFolder(pathOrPaths)
+      if (seq !== previewLoadSeqRef.current) return null
       setViewMode('folder')
       setEntries(res.entries)
       setMedia(res.media)
@@ -209,21 +228,27 @@ export default function App() {
       setScopePath(res.scope_path)
       setBreadcrumb(res.breadcrumb)
       setSelectedIds(new Set())
-      setStatus(`已載入 ${res.entries.length} 個資料夾、${res.media.length} 個媒體`)
+      setStatus(formatPreviewLoadStatus(res.entries, res.media.length))
       return res
     } catch (e) {
+      if (seq !== previewLoadSeqRef.current) return null
       setStatus(String(e))
       return null
     } finally {
-      setLoading(false)
+      if (seq === previewLoadSeqRef.current) {
+        setLoading(false)
+      }
     }
   }, [])
 
   const loadTaggedMedia = useCallback(async (paths: string[]) => {
+    const seq = ++previewLoadSeqRef.current
     setLoading(true)
     setViewMode('media')
+    setStatus('正在載入預覽…')
     try {
       const res = await api.getTaggedMedia(paths)
+      if (seq !== previewLoadSeqRef.current) return null
       setViewMode('media')
       setMedia(res.items)
       setEntries([])
@@ -234,6 +259,7 @@ export default function App() {
       setStatus(`已載入 ${res.items.length} 個符合標籤的媒體`)
       return res
     } catch (e) {
+      if (seq !== previewLoadSeqRef.current) return null
       setViewMode('media')
       setEntries([])
       setMedia([])
@@ -242,7 +268,9 @@ export default function App() {
       setStatus(String(e))
       return null
     } finally {
-      setLoading(false)
+      if (seq === previewLoadSeqRef.current) {
+        setLoading(false)
+      }
     }
   }, [])
 
@@ -258,13 +286,18 @@ export default function App() {
       await api.health()
       const cfg = await api.getConfig()
       setConfig(cfg)
-      await Promise.all([loadTags(), refreshTree()])
+      void loadTags()
+      await refreshTree()
       if (cfg.has_root && cfg.root_folder) {
         await loadFolder(cfg.root_folder)
         setSelectedTreePaths([cfg.root_folder])
         setSelectedTreeTypes({ [cfg.root_folder]: 'root' })
+        if (cfg.migration_message) {
+          setStatus(cfg.migration_message)
+        }
+      } else {
+        setStatus(cfg.migration_message || '就緒')
       }
-      setStatus(cfg.migration_message || '就緒')
     } catch (e) {
       setStatus(`無法連線後端：${e}`)
     } finally {
@@ -619,7 +652,11 @@ export default function App() {
     const tags = parseTagInput(raw)
     try {
       const res = await api.setTags(uniquePaths, tags)
-      setStatus(res.message)
+      if (res.ok === false) {
+        setStatus(res.warnings?.length ? `${res.message}：${res.warnings.join('；')}` : res.message)
+        return
+      }
+      setStatus(res.warnings?.length ? `${res.message}：${res.warnings.join('；')}` : res.message)
       if (res.all_tags) setAllTags(res.all_tags)
       if (filter.selected_tags.length > 0) {
         await reloadCurrentPreview()
@@ -689,7 +726,7 @@ export default function App() {
       setFilter(res.filter_state)
       await refreshTree()
       await reloadCurrentPreview()
-      setStatus(`已刪除 ${uniqueTags.length} 個標籤`)
+      setStatus(res.message ?? `已刪除 ${uniqueTags.length} 個標籤${res.warnings?.length ? `：${res.warnings[0]}` : ''}`)
     } catch (e) {
       setAllTags(previousAllTags)
       setFilter(previousFilter)
@@ -942,7 +979,7 @@ export default function App() {
         }
         breadcrumb={breadcrumb}
         scopeLabel={scopeLabel}
-        status={loading ? `${status} · 載入中…` : status}
+        status={status}
         rootFolder={config.root_folder}
         sidebarOpen={sidebarOpen}
         darkMode={darkMode}
@@ -951,9 +988,12 @@ export default function App() {
         onNavigate={handleNavigate}
         onChooseFolder={chooseFolder}
         onRefresh={async () => {
-          await api.invalidateTagCache()
+          const res = await api.invalidateTagCache()
+          if (res.all_tags?.length) {
+            setAllTags(res.all_tags)
+          }
           await Promise.all([refreshTree(), loadTags(), reloadCurrentPreview()])
-          setStatus('已刷新')
+          setStatus(res.message || '已刷新')
         }}
         onImportTags={handleImportTags}
         onExportTags={handleExportTags}

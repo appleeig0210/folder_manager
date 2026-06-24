@@ -87,6 +87,8 @@ export interface TagListResponse {
   filter_state: FilterState
   index_ready?: boolean
   scanning?: boolean
+  message?: string | null
+  warnings?: string[] | null
 }
 
 export interface StatusResponse {

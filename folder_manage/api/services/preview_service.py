@@ -287,5 +287,6 @@ class PreviewService:
             media_count=media_count,
         )
 
-    def get_media_tags_map(self, items: list[MediaItem]) -> dict[str, list[str]]:
-        return self.keyword_service.media_items_with_tags(self.store, items)
+    def get_media_tags_map(self, items: list[MediaItem], *, index_only: bool = False) -> dict[str, list[str]]:
+        paths = [item.media_path for item in items]
+        return self.keyword_service.read_keywords_batch(paths, fetch_misses=not index_only)

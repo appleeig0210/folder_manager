@@ -85,7 +85,12 @@ def set_tags(body: SetTagsRequest) -> StatusResponse:
     message = f"已更新 {updated} 個媒體檔標籤"
     if warnings:
         message += f"（{len(warnings)} 個失敗）"
-    return StatusResponse(message=message, all_tags=all_tags)
+    return StatusResponse(
+        message=message,
+        warnings=warnings or None,
+        ok=updated > 0 or not warnings,
+        all_tags=all_tags,
+    )
 
 
 @router.post("/add", response_model=StatusResponse)
@@ -118,7 +123,7 @@ def delete_tags(body: DeleteTagsRequest) -> TagListResponse:
     if ctx.store.root_folder is None:
         raise HTTPException(status_code=400, detail="請先設定主資料夾")
     try:
-        ctx.keyword_service.remove_tags_everywhere(ctx.store, tags)
+        updated, warnings = ctx.keyword_service.remove_tags_everywhere(ctx.store, tags)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     deleted = {tag.casefold() for tag in tags}
@@ -126,7 +131,11 @@ def delete_tags(body: DeleteTagsRequest) -> TagListResponse:
         tag for tag in ctx.selected_filter_tags if tag.casefold() not in deleted
     }
     ctx.preview_service.clear_filter_cache()
-    return _tag_list_response(ctx)
+    response = _tag_list_response(ctx)
+    message = f"已從 {updated} 個媒體檔移除標籤"
+    if warnings:
+        message += f"（{len(warnings)} 個失敗）"
+    return response.model_copy(update={"message": message, "warnings": warnings or None})
 
 
 @router.post("/invalidate", response_model=StatusResponse)
@@ -134,11 +143,12 @@ def invalidate_cache() -> StatusResponse:
     ctx = get_ctx()
     ctx.keyword_service.invalidate_all()
     ctx.preview_service.clear_filter_cache()
-    index_ready, scanning = _tag_index_flags(ctx)
+    _, scanning = _tag_index_flags(ctx)
     detail = "已清除媒體標籤快取"
     if scanning:
         detail += "，正在背景重建索引"
-    return StatusResponse(message=detail, all_tags=[] if not index_ready else _all_tags_from_index(ctx))
+    all_tags = _all_tags_from_index(ctx) if ctx.store.root_folder is not None else []
+    return StatusResponse(message=detail, all_tags=all_tags)
 
 
 @router.get("/export")

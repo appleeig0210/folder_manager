@@ -206,7 +206,7 @@ def get_folder(
     media_items = _apply_media_manual_order(ctx, media_items, scope_path)
 
     entry_items = [_entry_to_item(e, ctx.store) for e in subfolder_entries]
-    tags_map = ctx.preview_service.get_media_tags_map(media_items)
+    tags_map = ctx.preview_service.get_media_tags_map(media_items, index_only=True)
     media_responses = [
         _media_to_item(
             ctx,
