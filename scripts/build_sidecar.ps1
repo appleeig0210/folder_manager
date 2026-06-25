@@ -20,6 +20,11 @@ pyinstaller --onefile --name api-server --paths . api/main.py `
   --hidden-import=api.routes.files `
   --hidden-import=media_keyword_service `
   --hidden-import=folder_tags_migration `
+  --hidden-import=tag_index_store `
+  --hidden-import=app_paths `
+  --hidden-import=exiftool_session `
+  --hidden-import=media_path_filters `
+  --hidden-import=people_data_store `
   --collect-submodules=uvicorn
 Pop-Location
 
