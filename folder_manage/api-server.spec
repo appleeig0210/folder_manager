@@ -1,20 +1,46 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import sys
+
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['api.deps', 'api.routes.config', 'api.routes.tree', 'api.routes.preview', 'api.routes.thumbnails', 'api.routes.tags', 'api.routes.files', 'media_keyword_service', 'folder_tags_migration', 'tag_index_store', 'app_paths', 'exiftool_session', 'media_path_filters', 'people_data_store']
-hiddenimports += collect_submodules('uvicorn')
+# Spec lives in folder_manage; build deterministically from here on every platform.
+FOLDER_MANAGE = os.path.abspath(SPECPATH)
+if FOLDER_MANAGE not in sys.path:
+    sys.path.insert(0, FOLDER_MANAGE)
 
+# GUI-only / non-sidecar modules that must NOT be pulled into the headless API build.
+_EXCLUDE_LOCAL = {"people_folder_manager"}
+
+
+def _discover_local_modules():
+    """自動掃描 folder_manage 根目錄的頂層單檔模組，新增後端模組免再手動維護 hidden-import。"""
+    modules = []
+    for name in sorted(os.listdir(FOLDER_MANAGE)):
+        if not name.endswith(".py") or name == "__init__.py":
+            continue
+        module = name[:-3]
+        if module in _EXCLUDE_LOCAL:
+            continue
+        modules.append(module)
+    return modules
+
+
+hiddenimports = []
+hiddenimports += collect_submodules("api")
+hiddenimports += collect_submodules("uvicorn")
+hiddenimports += _discover_local_modules()
 
 a = Analysis(
-    ['api\\main.py'],
-    pathex=['.'],
+    [os.path.join(FOLDER_MANAGE, "api", "main.py")],
+    pathex=[FOLDER_MANAGE],
     binaries=[],
     datas=[],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["tkinter", "customtkinter", "tkinterdnd2"],
     noarchive=False,
     optimize=0,
 )
@@ -26,11 +52,11 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='api-server',
+    name="api-server",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,

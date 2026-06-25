@@ -18,26 +18,20 @@ mkdir -p "$BIN_DIR"
 pushd "$FOLDER_MANAGE" >/dev/null
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt pyinstaller
-pyinstaller \
-  --onefile \
-  --name api-server \
-  --paths . \
-  api/main.py \
-  --hidden-import=api.deps \
-  --hidden-import=api.routes.config \
-  --hidden-import=api.routes.tree \
-  --hidden-import=api.routes.preview \
-  --hidden-import=api.routes.thumbnails \
-  --hidden-import=api.routes.tags \
-  --hidden-import=api.routes.files \
-  --hidden-import=media_keyword_service \
-  --hidden-import=folder_tags_migration \
-  --hidden-import=tag_index_store \
-  --hidden-import=app_paths \
-  --hidden-import=exiftool_session \
-  --hidden-import=media_path_filters \
-  --hidden-import=people_data_store \
-  --collect-submodules=uvicorn
+# 用 spec 打包：絕對 pathex + 自動掃描頂層模組，跨平台一致，新增模組免維護。
+pyinstaller --clean --noconfirm api-server.spec
+
+# 診斷：列出 PyInstaller 對後端本地模組的缺漏警告（若 sidecar 仍缺模組，CI log 可直接看到）。
+WARN_FILE="$FOLDER_MANAGE/build/api-server/warn-api-server.txt"
+if [[ -f "$WARN_FILE" ]]; then
+  echo "==== PyInstaller missing-module check (local backend modules) ===="
+  if grep -E "^missing module named '(tag_index_store|app_paths|exiftool_session|media_path_filters|people_data_store|media_keyword_service|folder_tags_migration)'" "$WARN_FILE"; then
+    echo "ERROR: a required backend module was not bundled (see above)." >&2
+    popd >/dev/null
+    exit 1
+  fi
+  echo "(no missing local backend modules)"
+fi
 popd >/dev/null
 
 EXIFTOOL_DEST="$BIN_DIR/exiftool"

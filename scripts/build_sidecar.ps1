@@ -10,22 +10,8 @@ New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 Push-Location $FolderManage
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt pyinstaller
-pyinstaller --onefile --name api-server --paths . api/main.py `
-  --hidden-import=api.deps `
-  --hidden-import=api.routes.config `
-  --hidden-import=api.routes.tree `
-  --hidden-import=api.routes.preview `
-  --hidden-import=api.routes.thumbnails `
-  --hidden-import=api.routes.tags `
-  --hidden-import=api.routes.files `
-  --hidden-import=media_keyword_service `
-  --hidden-import=folder_tags_migration `
-  --hidden-import=tag_index_store `
-  --hidden-import=app_paths `
-  --hidden-import=exiftool_session `
-  --hidden-import=media_path_filters `
-  --hidden-import=people_data_store `
-  --collect-submodules=uvicorn
+# 用 spec 打包：絕對 pathex + 自動掃描頂層模組，與 macOS 建置一致，新增模組免維護。
+pyinstaller --clean --noconfirm api-server.spec
 Pop-Location
 
 $ExifToolDest = Join-Path $BinDir "exiftool"
