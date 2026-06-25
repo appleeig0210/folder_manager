@@ -26,16 +26,25 @@ def _discover_local_modules():
     return modules
 
 
+_LOCAL_MODULES = _discover_local_modules()
+
 hiddenimports = []
 hiddenimports += collect_submodules("api")
 hiddenimports += collect_submodules("uvicorn")
-hiddenimports += _discover_local_modules()
+hiddenimports += _LOCAL_MODULES
+
+# 萬無一失：把頂層後端模組的原始檔直接放進 bundle 根目錄。
+# onefile 執行時 _MEIPASS 一定在 sys.path 上，因此即使 modulegraph 漏抓也保證 import 得到。
+datas = [(os.path.join(FOLDER_MANAGE, f"{m}.py"), ".") for m in _LOCAL_MODULES]
+
+print(f"[api-server.spec] FOLDER_MANAGE={FOLDER_MANAGE}")
+print(f"[api-server.spec] local modules bundled as data: {_LOCAL_MODULES}")
 
 a = Analysis(
     [os.path.join(FOLDER_MANAGE, "api", "main.py")],
     pathex=[FOLDER_MANAGE],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
