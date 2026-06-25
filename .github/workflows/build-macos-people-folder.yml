@@ -60,6 +60,10 @@ jobs:
         run: |
           npm run sidecar:mac
 
+      - name: Smoke test api-server sidecar
+        run: |
+          bash scripts/smoke_test_sidecar.sh
+
       - name: Build Tauri app
         run: |
           npm run tauri:build -- --bundles app
