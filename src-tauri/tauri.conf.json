@@ -53,7 +53,8 @@
       "bin/exiftool/": "exiftool/"
     },
     "macOS": {
-      "infoPlist": "./Info.plist"
+      "infoPlist": "./Info.plist",
+      "signingIdentity": "-"
     }
   }
 }

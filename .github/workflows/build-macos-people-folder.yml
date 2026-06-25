@@ -13,10 +13,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Intel 處理器 Mac（x86_64）— 請勿在 Apple Silicon 上當主程式使用（會顯示不支援）
           - runner: macos-15-intel
             package_label: Intel-x86_64
-          # M1 / M2 / M3 等 Apple Silicon（arm64）
           - runner: macos-latest
             package_label: AppleSilicon-arm64
 
@@ -64,12 +62,42 @@ jobs:
 
       - name: Build Tauri app
         run: |
-          # CI 無 Finder/Automation 權限，bundle_dmg.sh 常失敗；產物以 .app 為主，後續再打包 zip。
-          npm run tauri:build -- --bundles app --no-sign
+          npm run tauri:build -- --bundles app
 
       - name: Show bundle output
         run: |
           find src-tauri/target/release/bundle -maxdepth 3 -print || true
+
+      - name: Ad-hoc sign app bundle
+        run: |
+          APP_PATH="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "Tauri .app output not found"
+            exit 1
+          fi
+
+          echo "Signing bundle: $APP_PATH"
+
+          # 先把 bundle 內的可執行檔都簽掉，包含 sidecar
+          if [ -d "$APP_PATH/Contents/MacOS" ]; then
+            find "$APP_PATH/Contents/MacOS" -type f -print0 | while IFS= read -r -d '' BIN; do
+              chmod +x "$BIN" || true
+              codesign --force --sign - --timestamp=none "$BIN"
+            done
+          fi
+
+          # 若有 frameworks / dylib，也一起簽
+          if [ -d "$APP_PATH/Contents/Frameworks" ]; then
+            find "$APP_PATH/Contents/Frameworks" \( -name '*.dylib' -o -name '*.framework' -o -name '*.so' \) -print0 | while IFS= read -r -d '' ITEM; do
+              codesign --force --sign - --timestamp=none --deep "$ITEM"
+            done
+          fi
+
+          # 最後整包再簽一次
+          codesign --force --sign - --timestamp=none --deep "$APP_PATH"
+
+          # 驗證
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
       - name: Package app
         run: |
