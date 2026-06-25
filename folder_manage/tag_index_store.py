@@ -83,7 +83,9 @@ class TagIndexStore:
         base = base.replace("\\", "/")
         if not base.endswith("/"):
             base = f"{base}/"
-        return f"{base.replace('%', '\\%').replace('_', '\\_')}%"
+        # 先算好跳脫字串再帶入 f-string，避免 Python 3.11 的「f-string 運算式不可含反斜線」限制。
+        escaped = base.replace("%", "\\%").replace("_", "\\_")
+        return f"{escaped}%"
 
     def get_batch(
         self,
